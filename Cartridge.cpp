@@ -23,6 +23,11 @@
 // Cartridge.cpp
 // ----------------------------------------------------------------------------
 #include "Cartridge.h"
+#include "Region.h"
+#include "wii_app_common.h"
+#include "wii_atari.h"
+#include <string.h>
+#define CARTRIDGE_SOURCE "Cartridge.cpp"
 
 std::string cartridge_title;
 std::string cartridge_description;
@@ -36,6 +41,16 @@ bool cartridge_pokey;
 byte cartridge_controller[2];
 byte cartridge_bank;
 uint cartridge_flags;
+int cartridge_crosshair_x;
+int cartridge_crosshair_y;
+bool cartridge_dualanalog = false;
+uint cartridge_hblank = 34;
+
+// Whether the cartridge has accessed the high score ROM (indicates that the
+// SRAM should be persisted when the cartridge is unloaded)
+bool high_score_set = false;
+// Whether the high score cart has been loaded
+static bool high_score_cart_loaded = false;
 
 static byte* cartridge_buffer = NULL;
 static uint cartridge_size = 0;
@@ -52,6 +67,8 @@ static bool cartridge_HasHeader(const byte* header) {
   }
   return true;
 }
+
+// 1.3
 
 // ----------------------------------------------------------------------------
 // Header for CC2 hack
@@ -88,13 +105,19 @@ static void cartridge_WriteBank(word address, byte bank) {
 // ReadHeader
 // ----------------------------------------------------------------------------
 static void cartridge_ReadHeader(const byte* header) {
+
+  if( wii_debug )
+  {
+      fprintf( stderr, "reading cartridge header:\n" );
+  }
+
   char temp[33] = {0};
   for(int index = 0; index < 32; index++) {
     temp[index] = header[index + 17];  
   }
   cartridge_title = temp;
-  
-  cartridge_size  = header[49] << 32;
+    
+  cartridge_size  = header[49] << 32; // Why 32?  
   cartridge_size |= header[50] << 16;
   cartridge_size |= header[51] << 8;
   cartridge_size |= header[52];
@@ -140,7 +163,7 @@ static void cartridge_ReadHeader(const byte* header) {
 // ----------------------------------------------------------------------------
 static bool cartridge_Load(const byte* data, uint size) {
   if(size <= 128) {
-    logger_LogError(IDS_CARTRIDGE1,"");
+    logger_LogError("Cartridge data is invalid.", CARTRIDGE_SOURCE);
     return false;
   }
 
@@ -151,8 +174,9 @@ static bool cartridge_Load(const byte* data, uint size) {
     header[index] = data[index];
   }
 
-if (cartridge_CC2(header)) {
-    logger_LogError(IDS_CARTRIDGE9,"");
+  // 1.3
+  if (cartridge_CC2(header)) {
+    logger_LogError("Prosystem doesn't support CC2 hacks.", CARTRIDGE_SOURCE);
     return false;
   }
 
@@ -167,55 +191,48 @@ if (cartridge_CC2(header)) {
   }
   
   cartridge_buffer = new byte[cartridge_size];
-  for(index = 0; index < cartridge_size; index++) {
+  for(int index = 0; index < cartridge_size; index++) {
     cartridge_buffer[index] = data[index + offset];
   }
   
   cartridge_digest = hash_Compute(cartridge_buffer, cartridge_size);
-  
   return true;
 }
 
 // ----------------------------------------------------------------------------
 // Load
 // ----------------------------------------------------------------------------
-bool cartridge_Load(std::string filename) {
-  if(filename.empty( ) || filename.length( ) == 0) {
-    logger_LogError(IDS_CARTRIDGE2,"");
-    return false;
-  }
-  
-  cartridge_Release( );
-  logger_LogInfo(IDS_CARTRIDGE8,filename);
-    
-  byte* data = NULL;
+
+uint cartridge_Read(std::string filename, byte **outData ) {
+
+  byte *data = NULL;
   uint size = archive_GetUncompressedFileSize(filename);
   if(size == 0) {
     FILE *file = fopen(filename.c_str( ), "rb");
     if(file == NULL) {
-      logger_LogError(IDS_CARTRIDGE3, filename);
-      return false;  
+      logger_LogError("Failed to open the cartridge file " + filename + " for reading.", CARTRIDGE_SOURCE);
+      return 0;  
     }
 
-    if(fseek(file, 0, SEEK_END)) {
+    if(fseek(file, 0L, SEEK_END)) {
       fclose(file);
-      logger_LogError(IDS_CARTRIDGE4,"");
-      return false;
+      logger_LogError("Failed to find the end of the cartridge file.", CARTRIDGE_SOURCE);
+      return 0;
     }
     size = ftell(file);
-    if(fseek(file, 0, SEEK_SET)) {
+    if(fseek(file, 0L, SEEK_SET)) {
       fclose(file);
-      logger_LogError(IDS_CARTRIDGE5,"");
-      return false;
+      logger_LogError("Failed to find the size of the cartridge file.", CARTRIDGE_SOURCE);
+      return 0;
     }
-  
+
     data = new byte[size];
     if(fread(data, 1, size, file) != size && ferror(file)) {
       fclose(file);
-      logger_LogError(IDS_CARTRIDGE6,"");
+      logger_LogError("Failed to read the cartridge data.", CARTRIDGE_SOURCE);
       cartridge_Release( );
       delete [ ] data;
-      return false;
+      return 0;
     }    
 
     fclose(file);    
@@ -224,19 +241,168 @@ bool cartridge_Load(std::string filename) {
     data = new byte[size];
     archive_Uncompress(filename, data, size);
   }
+
+  *outData = data;
+  return size;
+}
+
+bool cartridge_Load(std::string filename) {
+  if(filename.empty( ) || filename.length( ) == 0) {
+    logger_LogError("Cartridge filename is invalid.", CARTRIDGE_SOURCE);
+    return false;
+  }
+
+  cartridge_Release();
+
+  logger_LogInfo("Opening cartridge file " + filename + ".");
+
+  byte *data = NULL;
+  uint size = cartridge_Read( filename, &data );
+  if( data == NULL )
+  {
+      return false;
+  }    
   
   if(!cartridge_Load(data, size)) {
-    logger_LogError(IDS_CARTRIDGE7,"");
+    logger_LogError("Failed to load the cartridge data into memory.", CARTRIDGE_SOURCE);
     delete [ ] data;
     return false;
   }
   if(data != NULL) {
     delete [ ] data;
-  }
-  
+  }  
   cartridge_filename = filename;
-  logger_LogInfo("MD5 hash:", cartridge_digest);
+
   return true;
+}
+
+bool cartridge_Load_buffer(char* rom_buffer, int rom_size) {
+  cartridge_Release();
+  byte* data = (byte *)rom_buffer;
+  uint size = rom_size;
+
+  if(!cartridge_Load(data, size)) {
+    return false;
+  }
+  cartridge_filename = "";
+  return true;
+}
+
+// The memory location of the high score cartridge SRAM
+#define HS_SRAM_START 0x1000
+// The size of the high score cartridge SRAM
+#define HS_SRAM_SIZE 2048
+
+/*
+ * Saves the high score cartridge SRAM
+ *
+ * return   Whether the save was successful
+ */
+bool cartridge_SaveHighScoreSram() 
+{    
+    if( !high_score_cart_loaded || !high_score_set )
+    {
+        // If we didn't load the high score cartridge, or the game didn't
+        // access the high score ROM, don't save.
+        return false;
+    }
+
+    std::string filename( WII_HIGH_SCORE_CART_SRAM );
+    FILE* file = fopen( filename.c_str(), "wb" );
+    if( file == NULL ) 
+    {
+        logger_LogError("Failed to open the file " + filename + " for writing.");
+        return false;
+    }
+
+    if( fwrite( &(memory_ram[HS_SRAM_START]), 1, HS_SRAM_SIZE, file ) != HS_SRAM_SIZE ) 
+    {
+        fclose( file );
+        logger_LogError("Failed to write highscore sram data to the file " + filename + ".");
+        return false;
+    }
+
+    fflush(file);
+    fclose(file);
+
+    return true;
+}
+
+/*
+ * Loads the high score cartridge SRAM
+ *
+ * return   Whether the load was successful
+ */
+static bool cartridge_LoadHighScoreSram() 
+{    
+    std::string filename( WII_HIGH_SCORE_CART_SRAM );
+    FILE* file = fopen( filename.c_str(), "rb" );
+    if( file == NULL ) 
+    {
+        return false;
+    }
+
+    byte sram[HS_SRAM_SIZE];
+    if( fread( sram, 1, HS_SRAM_SIZE, file ) != HS_SRAM_SIZE ) 
+    {
+        fclose( file );
+        logger_LogError("Failed to read highscore sram data from the file " + filename + ".");
+        return false;
+    }
+
+    for( uint i = 0; i < HS_SRAM_SIZE; i++ ) 
+    {
+        memory_Write( HS_SRAM_START + i, sram[i] );
+    }
+
+    fclose(file);
+
+    return true;
+}
+
+/*
+ * Loads the high score cartridge
+ *
+ * return   Whether the load was successful
+ */
+bool cartridge_LoadHighScoreCart() {
+
+    if( !wii_hs_enabled || cartridge_region != REGION_NTSC ) 
+    {
+        // Only load the cart if it is enabled and the region is NTSC
+        return false;
+    }
+
+    byte* high_score_buffer = NULL;
+    uint hsSize = cartridge_Read( WII_HIGH_SCORE_CART, &high_score_buffer );
+    if( high_score_buffer != NULL )
+    {
+        logger_LogInfo("Found high score cartridge.");
+        std::string digest = hash_Compute( high_score_buffer, hsSize );
+        if( digest == std::string("c8a73288ab97226c52602204ab894286") ) 
+        {
+            cartridge_LoadHighScoreSram();
+            for( uint i = 0; i < hsSize; i++ )
+            {
+                //memory_WriteROM( 0x3000, hsSize, high_score_buffer );
+                memory_Write( 0x3000 + i, high_score_buffer[i] );
+            }
+            high_score_cart_loaded = true;
+        }
+        else
+        {
+            logger_LogError("High score cartridge hash is invalid.");
+        }
+
+        delete [] high_score_buffer;
+        return high_score_cart_loaded;
+    }
+    else
+    {
+        logger_LogInfo("Unable to locate high score cartridge.");
+    }
+
+    return false;
 }
 
 // ----------------------------------------------------------------------------
@@ -315,7 +481,7 @@ void cartridge_Write(word address, byte data) {
       break;
   }
 
-  if(cartridge_pokey && address >= 0x4000 && address < 0x4009) {
+  if(cartridge_pokey && address >= 0x4000 && address <= 0x400f) {
     switch(address) {
       case POKEY_AUDF1:
         pokey_SetRegister(POKEY_AUDF1, data);
@@ -343,6 +509,9 @@ void cartridge_Write(word address, byte data) {
         break;
       case POKEY_AUDCTL:
         pokey_SetRegister(POKEY_AUDCTL, data);
+        break;
+      case POKEY_SKCTLS:
+        pokey_SetRegister(POKEY_SKCTLS, data);
         break;
     }
   }
@@ -385,9 +554,29 @@ bool cartridge_IsLoaded( ) {
 // Release
 // ----------------------------------------------------------------------------
 void cartridge_Release( ) {
+  high_score_cart_loaded = false;
+
   if(cartridge_buffer != NULL) {
     delete [ ] cartridge_buffer;
     cartridge_size = 0;
     cartridge_buffer = NULL;
+
+    //
+    // WII
+    //
+    // These values need to be reset so that moving between carts works
+    // consistently. This seems to be a ProSystem emulator bug.
+    //
+    cartridge_type = 0;
+    cartridge_region = 0;
+    cartridge_pokey = 0;
+    memset( cartridge_controller, 0, sizeof( cartridge_controller ) );
+    cartridge_bank = 0;
+    cartridge_flags = 0;
+    cartridge_crosshair_x = 0;
+    cartridge_crosshair_y = 0;    
+    high_score_set = false;
+    cartridge_hblank = 34;
+    cartridge_dualanalog = false;
   }
 }

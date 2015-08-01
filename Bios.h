@@ -24,9 +24,8 @@
 // ----------------------------------------------------------------------------
 #ifndef BIOS_H
 #define BIOS_H
-#define NULL 0
 
-#include <String>
+#include <string>
 #include "Memory.h"
 #include "Archive.h"
 #include "Logger.h"

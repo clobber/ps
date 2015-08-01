@@ -25,7 +25,6 @@
 #ifndef MEMORY_H
 #define MEMORY_H
 #define MEMORY_SIZE 65536
-#define NULL 0
 
 #include "Equates.h"
 #include "Bios.h"
@@ -44,5 +43,7 @@ extern void memory_WriteROM(word address, word size, const byte* data);
 extern void memory_ClearROM(word address, word size);
 extern byte memory_ram[MEMORY_SIZE];
 extern byte memory_rom[MEMORY_SIZE];
+
+extern "C" byte* get_memory_ram();
 
 #endif

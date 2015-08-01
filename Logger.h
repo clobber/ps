@@ -27,28 +27,66 @@
 #define LOGGER_LEVEL_DEBUG 0
 #define LOGGER_LEVEL_INFO 1
 #define LOGGER_LEVEL_ERROR 2
-#define NULL 0
 
-#include <Stdio.h>
-#include <String>
-#include <Time.h>
-#include "Windows.h"
-#include "Resource.h"
-
+#include <stdio.h>
+#include <string>
+#include <time.h>
 
 typedef unsigned char byte;
 typedef unsigned short word;
 typedef unsigned int uint;
+typedef unsigned long long ulong;
 
+#ifdef WII
+#ifdef LOWTRACE
+extern bool wii_lowtrace;
+#endif
+extern short wii_debug;
+extern "C" void wii_set_status_message( const char *message );
+extern "C" void wii_pause();
+#endif
+
+#ifdef DEBUG
 extern bool logger_Initialize( );
 extern bool logger_Initialize(std::string filename);
+extern void logger_LogError(std::string message);
 extern void logger_LogError(std::string message, std::string source);
-extern void logger_LogError(int message, std::string source);
+extern void logger_LogInfo(std::string message);
 extern void logger_LogInfo(std::string message, std::string source);
-extern void logger_LogInfo(int message, std::string source);
+extern void logger_LogDebug(std::string message);
 extern void logger_LogDebug(std::string message, std::string source);
-extern void logger_LogDebug(int, std::string source);
 extern void logger_Release( );
+#else
+#ifdef WII
+static inline bool logger_Initialize() { return true; }
+static inline bool logger_Initialize(std::string filename) { return true; }
+static inline void logger_LogError(std::string message) 
+{ 
+    if( wii_debug ) fprintf( stderr, "%s\n", message.c_str() ); 
+    wii_set_status_message( message.c_str() );    
+}
+static inline void logger_LogError(std::string message, std::string source) 
+{ 
+    if( wii_debug ) fprintf( stderr, "%s: %s\n", source.c_str(), message.c_str() ); 
+    wii_set_status_message( message.c_str() );
+}
+static inline void logger_LogInfo(std::string message) { if( wii_debug ) fprintf( stderr, "%s\n", message.c_str() ); }
+static inline void logger_LogInfo(std::string message, std::string source) { if( wii_debug ) fprintf( stderr, "%s: %s\n", source.c_str(), message.c_str() ); }
+static inline void logger_LogDebug(std::string message) { if( wii_debug ) fprintf( stderr, "%s\n", message.c_str() ); }
+static inline void logger_LogDebug(std::string message, std::string source) { if( wii_debug ) fprintf( stderr, "%s: %s\n", source.c_str(), message.c_str() ); }
+static inline void logger_Release( ) {}
+#else
+static inline bool logger_Initialize() { return true; }
+static inline bool logger_Initialize(std::string filename) { return true; }
+static inline void logger_LogError(std::string message) {}
+static inline void logger_LogError(std::string message, std::string source) {}
+static inline void logger_LogInfo(std::string message) {}
+static inline void logger_LogInfo(std::string message, std::string source) {}
+static inline void logger_LogDebug(std::string message) {}
+static inline void logger_LogDebug(std::string message, std::string source) {}
+static inline void logger_Release( ) {}
+#endif
+#endif
 extern byte logger_level;
 
 #endif

@@ -23,6 +23,7 @@
 // Sally.cpp
 // ----------------------------------------------------------------------------
 #include "Sally.h"
+#include "Cartridge.h"
 
 byte sally_a = 0;
 byte sally_x = 0;
@@ -34,6 +35,12 @@ pair sally_pc = {0};
 static byte sally_opcode;
 static pair sally_address;
 static uint sally_cycles;
+
+// Whether the last operation resulted in a half cycle. (needs to be taken 
+// into consideration by ProSystem when cycle counting). This can occur when
+// a TIA or RIOT are accessed (drops to 1.19Mhz when the TIA or RIOT chips 
+// are accessed)
+bool half_cycle = false;
 
 struct Flag {
   byte C;
@@ -58,28 +65,51 @@ static const Vector SALLY_NMI = {65531, 65530};
 static const Vector SALLY_IRQ = {65535, 65534}; 
 
 static const byte SALLY_CYCLES[256] = {
-	7,6,0,0,0,3,5,0,3,2,2,0,0,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
-	6,6,0,0,3,3,5,0,4,2,2,0,4,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
-	6,6,0,0,0,3,5,0,3,2,2,0,3,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
-	6,6,0,0,0,3,5,0,4,2,2,0,5,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
-	0,6,0,0,3,3,3,0,2,0,2,0,4,4,4,0,
-	2,6,0,0,4,4,4,0,2,5,2,0,0,5,0,0,
-	2,6,2,0,3,3,3,0,2,2,2,0,4,4,4,0,
-	2,5,0,0,4,4,4,0,2,4,2,0,4,4,4,0,
-	2,6,0,0,3,3,5,0,2,2,2,0,4,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
-	2,6,0,0,3,3,5,0,2,2,2,0,4,4,6,0,
-	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0,
+	7,6,0,0,0,3,5,0,3,2,2,0,0,4,6,0, // 0 - 15
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 16 - 31
+	6,6,0,0,3,3,5,0,4,2,2,0,4,4,6,0, // 32 - 47
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 48 - 63
+	6,6,0,0,0,3,5,0,3,2,2,0,3,4,6,0, // 64 - 79
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 80 - 95
+	6,6,0,0,0,3,5,0,4,2,2,0,5,4,6,0, // 96 - 111
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 112 - 127
+	0,6,0,0,3,3,3,0,2,0,2,0,4,4,4,0, // 128 - 143
+	2,6,0,0,4,4,4,0,2,5,2,0,0,5,0,0, // 144 - 159
+	2,6,2,0,3,3,3,0,2,2,2,0,4,4,4,0, // 160 - 175
+	2,5,0,0,4,4,4,0,2,4,2,0,4,4,4,0, // 176 - 191
+	2,6,0,0,3,3,5,0,2,2,2,0,4,4,6,0, // 192 - 207
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 208 - 223
+	2,6,0,0,3,3,5,0,2,2,2,0,4,4,6,0, // 222 - 239
+	2,5,0,0,0,4,6,0,2,4,0,0,0,4,7,0, // 240 - 255
 };
 
+#if 0
+static char msg[512];
+#endif
+
+/*
+ * Checks to see if the High Score ROM has been accessed via known entry 
+ * points. This is necessary due to the fact that some ROMs (Xenophobe, etc.)
+ * overwrite SRAM of the high score cart. In such cases, they don't ever 
+ * access the high score cartrisge. By setting a flag, we know when to persist
+ * changes to SRAM
+ */
+static inline void sally_checkHighScoreSet()
+{
+  if( sally_pc.w == 0x3fcf || sally_pc.w == 0x3ffd )
+  {  
+     high_score_set = true;
+  }
+}
+  
 // ----------------------------------------------------------------------------
 // Push
 // ----------------------------------------------------------------------------
-static void sally_Push(byte data) {
+static inline void sally_Push(byte data) {
+#ifdef LOWTRACE
+sprintf( msg, "Push: %d", data );
+logger_LogInfo( msg );
+#endif
   memory_Write(sally_s + 256, data);
   sally_s--;
 }
@@ -88,6 +118,10 @@ static void sally_Push(byte data) {
 // Pop
 // ----------------------------------------------------------------------------
 static byte sally_Pop( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Pop" );
+logger_LogInfo( msg );
+#endif
   sally_s++;
   return memory_Read(sally_s + 256);
 }
@@ -95,7 +129,12 @@ static byte sally_Pop( ) {
 // ----------------------------------------------------------------------------
 // Flags
 // ----------------------------------------------------------------------------
-static void sally_Flags(byte data) {
+static inline void sally_Flags(byte data) {
+#ifdef LOWTRACE
+sprintf( msg, "Flags: %d", data );
+logger_LogInfo( msg );
+#endif
+
   if(!data) {
     sally_p |= SALLY_FLAG.Z;
   }
@@ -113,10 +152,15 @@ static void sally_Flags(byte data) {
 // ----------------------------------------------------------------------------
 // Branch
 // ----------------------------------------------------------------------------
-static void sally_Branch(byte branch) {
+static inline void sally_Branch(byte branch) {
+#ifdef LOWTRACE
+sprintf( msg, "Branch: %d", branch );
+logger_LogInfo( msg );
+#endif
+
   if(branch) {
     pair temp = sally_pc;
-    sally_pc.w += (char)sally_address.b.l;
+    sally_pc.w += (signed char)sally_address.b.l;
        
     if(temp.b.h != sally_pc.b.h) {
       sally_cycles += 2;
@@ -130,7 +174,12 @@ static void sally_Branch(byte branch) {
 // ----------------------------------------------------------------------------
 // Delay
 // ----------------------------------------------------------------------------
-static void sally_Delay(byte delta) {
+static inline void sally_Delay(byte delta) {
+#ifdef LOWTRACE
+sprintf( msg, "Delay: %d", delta );
+logger_LogInfo( msg );
+#endif
+
   pair address1 = sally_address;
   pair address2 = sally_address;
   address1.w -= delta;
@@ -142,7 +191,12 @@ static void sally_Delay(byte delta) {
 // ----------------------------------------------------------------------------
 // Absolute
 // ----------------------------------------------------------------------------
-static void sally_Absolute( ) {
+static inline void sally_Absolute( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Absolute" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.b.l = memory_Read(sally_pc.w++);
   sally_address.b.h = memory_Read(sally_pc.w++);
 }
@@ -150,7 +204,12 @@ static void sally_Absolute( ) {
 // ----------------------------------------------------------------------------
 // AbsoluteX
 // ----------------------------------------------------------------------------
-static void sally_AbsoluteX( ) {
+static inline void sally_AbsoluteX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "AbsoluteX" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.b.l = memory_Read(sally_pc.w++);
   sally_address.b.h = memory_Read(sally_pc.w++);
   sally_address.w += sally_x;
@@ -159,7 +218,12 @@ static void sally_AbsoluteX( ) {
 // ----------------------------------------------------------------------------
 // AbsoluteY
 // ----------------------------------------------------------------------------
-static void sally_AbsoluteY( ) {
+static inline void sally_AbsoluteY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "AbsoluteY" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.b.l = memory_Read(sally_pc.w++);
   sally_address.b.h = memory_Read(sally_pc.w++);
   sally_address.w += sally_y;
@@ -168,14 +232,24 @@ static void sally_AbsoluteY( ) {
 // ----------------------------------------------------------------------------
 // Immediate
 // ----------------------------------------------------------------------------
-static void sally_Immediate( ) {
+static inline void sally_Immediate( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Immediate" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.w = sally_pc.w++;
 }
 
 // ----------------------------------------------------------------------------
 // Indirect
 // ----------------------------------------------------------------------------
-static void sally_Indirect( ) {
+static inline void sally_Indirect( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Indirect" );
+logger_LogInfo( msg );
+#endif
+
   pair base;
   base.b.l = memory_Read(sally_pc.w++);
   base.b.h = memory_Read(sally_pc.w++);
@@ -186,7 +260,12 @@ static void sally_Indirect( ) {
 // ----------------------------------------------------------------------------
 // IndirectX
 // ----------------------------------------------------------------------------
-static void sally_IndirectX( ) {
+static inline void sally_IndirectX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "IndirectX" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.b.l = memory_Read(sally_pc.w++) + sally_x;
   sally_address.b.h = memory_Read(sally_address.b.l + 1);
   sally_address.b.l = memory_Read(sally_address.b.l);
@@ -195,7 +274,12 @@ static void sally_IndirectX( ) {
 // ----------------------------------------------------------------------------
 // IndirectY
 // ----------------------------------------------------------------------------
-static void sally_IndirectY( ) {
+static inline void sally_IndirectY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "IndirectY" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.b.l = memory_Read(sally_pc.w++);
   sally_address.b.h = memory_Read(sally_address.b.l + 1);
   sally_address.b.l = memory_Read(sally_address.b.l);
@@ -205,21 +289,36 @@ static void sally_IndirectY( ) {
 // ----------------------------------------------------------------------------
 // Relative
 // ----------------------------------------------------------------------------
-static void sally_Relative( ) {
+static inline void sally_Relative( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Relative" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.w = memory_Read(sally_pc.w++);
 }
 
 // ----------------------------------------------------------------------------
 // Zero Page
 // ----------------------------------------------------------------------------
-static void sally_ZeroPage( ) {
+static inline void sally_ZeroPage( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ZeroPage" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.w = memory_Read(sally_pc.w++);
 }
 
 // ----------------------------------------------------------------------------
 // ZeroPageX
 // ----------------------------------------------------------------------------
-static void sally_ZeroPageX( ) {
+static inline void sally_ZeroPageX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ZeroPageX" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.w = memory_Read(sally_pc.w++);
   sally_address.b.l += sally_x;
 }
@@ -227,7 +326,12 @@ static void sally_ZeroPageX( ) {
 // ----------------------------------------------------------------------------
 // ZeroPageY
 // ----------------------------------------------------------------------------
-static void sally_ZeroPageY( ) {
+static inline void sally_ZeroPageY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ZeroPageY" );
+logger_LogInfo( msg );
+#endif
+
   sally_address.w = memory_Read(sally_pc.w++);
   sally_address.b.l += sally_y;
 }
@@ -235,7 +339,12 @@ static void sally_ZeroPageY( ) {
 // ----------------------------------------------------------------------------
 // ADC
 // ----------------------------------------------------------------------------
-static void sally_ADC( ) {
+static inline void sally_ADC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ADC" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   if(sally_p & SALLY_FLAG.D) {
@@ -307,7 +416,12 @@ static void sally_ADC( ) {
 // ----------------------------------------------------------------------------
 // AND
 // ----------------------------------------------------------------------------
-static void sally_AND( ) {
+static inline void sally_AND( ) {
+#ifdef LOWTRACE
+sprintf( msg, "AND" );
+logger_LogInfo( msg );
+#endif
+
   sally_a &= memory_Read(sally_address.w);
   sally_Flags(sally_a);
 }
@@ -315,7 +429,12 @@ static void sally_AND( ) {
 // ----------------------------------------------------------------------------
 // ASLA
 // ----------------------------------------------------------------------------
-static void sally_ASLA( ) {
+static inline void sally_ASLA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ASLA" );
+logger_LogInfo( msg );
+#endif
+
   if(sally_a & 128) {
     sally_p |= SALLY_FLAG.C;
   }
@@ -330,7 +449,12 @@ static void sally_ASLA( ) {
 // ----------------------------------------------------------------------------
 // ASL
 // ----------------------------------------------------------------------------
-static void sally_ASL( ) {
+static inline void sally_ASL( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ASL" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   if(data & 128) {
@@ -348,28 +472,48 @@ static void sally_ASL( ) {
 // ----------------------------------------------------------------------------
 // BCC
 // ----------------------------------------------------------------------------
-static void sally_BCC( ) {
+static inline void sally_BCC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BCC" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(!(sally_p & SALLY_FLAG.C));
 }
 
 // ----------------------------------------------------------------------------
 // BCS
 // ----------------------------------------------------------------------------
-static void sally_BCS( ) {
+static inline void sally_BCS( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BCS" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(sally_p & SALLY_FLAG.C);
 }
 
 // ----------------------------------------------------------------------------
 // BEQ
 // ----------------------------------------------------------------------------
-static void sally_BEQ( ) {
+static inline void sally_BEQ( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BEQ" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(sally_p & SALLY_FLAG.Z);
 }
 
 // ----------------------------------------------------------------------------
 // BIT
 // ----------------------------------------------------------------------------
-static void sally_BIT( ) {
+static inline void sally_BIT( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BIT" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   if(!(data & sally_a)) {
@@ -388,28 +532,48 @@ static void sally_BIT( ) {
 // ----------------------------------------------------------------------------
 // BMI
 // ----------------------------------------------------------------------------
-static void sally_BMI( ) {
+static inline void sally_BMI( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BMI" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(sally_p & SALLY_FLAG.N);
 }
 
 // ----------------------------------------------------------------------------
 // BNE
 // ----------------------------------------------------------------------------
-static void sally_BNE( ) {
+static inline void sally_BNE( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BNE" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(!(sally_p & SALLY_FLAG.Z));
 }
 
 // ----------------------------------------------------------------------------
 // BPL
 // ----------------------------------------------------------------------------
-static void sally_BPL( ) {
+static inline void sally_BPL( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BPL" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(!(sally_p & SALLY_FLAG.N));
 }
 
 // ----------------------------------------------------------------------------
 // BRK
 // ----------------------------------------------------------------------------
-static void sally_BRK( ) {
+static inline void sally_BRK( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BRK" );
+logger_LogInfo( msg );
+#endif
+
   sally_pc.w++;
   sally_p |= SALLY_FLAG.B;
     
@@ -425,49 +589,84 @@ static void sally_BRK( ) {
 // ----------------------------------------------------------------------------
 // BVC
 // ----------------------------------------------------------------------------
-static void sally_BVC( ) {
+static inline void sally_BVC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BVC" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(!(sally_p & SALLY_FLAG.V));
 }
 
 // ----------------------------------------------------------------------------
 // BVS
 // ----------------------------------------------------------------------------
-static void sally_BVS( ) {
+static inline void sally_BVS( ) {
+#ifdef LOWTRACE
+sprintf( msg, "BVS" );
+logger_LogInfo( msg );
+#endif
+
   sally_Branch(sally_p & SALLY_FLAG.V);
 }
 
 // ----------------------------------------------------------------------------
 // CLC
 // ----------------------------------------------------------------------------
-static void sally_CLC( ) {
+static inline void sally_CLC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CLC" );
+logger_LogInfo( msg );
+#endif
+
   sally_p &= ~SALLY_FLAG.C;
 }
 
 // ----------------------------------------------------------------------------
 // CLD
 // ----------------------------------------------------------------------------
-static void sally_CLD( ) {
+static inline void sally_CLD( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CLD" );
+logger_LogInfo( msg );
+#endif
+
   sally_p &= ~SALLY_FLAG.D;
 }
 
 // ----------------------------------------------------------------------------
 // CLI
 // ----------------------------------------------------------------------------
-static void sally_CLI( ) {
+static inline void sally_CLI( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CLI" );
+logger_LogInfo( msg );
+#endif
+
   sally_p &= ~SALLY_FLAG.I;
 }
 
 // ----------------------------------------------------------------------------
 // CLV
 // ----------------------------------------------------------------------------
-static void sally_CLV( ) {
+static inline void sally_CLV( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CLV" );
+logger_LogInfo( msg );
+#endif
+
   sally_p &= ~SALLY_FLAG.V;
 }
 
 // ----------------------------------------------------------------------------
 // CMP
 // ----------------------------------------------------------------------------
-static void sally_CMP( ) {
+static inline void sally_CMP( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CMP" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   if(sally_a >= data) {
@@ -483,7 +682,12 @@ static void sally_CMP( ) {
 // ----------------------------------------------------------------------------
 // CPX
 // ----------------------------------------------------------------------------
-static void sally_CPX( ) {
+static inline void sally_CPX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CPX" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   if(sally_x >= data) {
@@ -499,7 +703,12 @@ static void sally_CPX( ) {
 // ----------------------------------------------------------------------------
 // CPY
 // ----------------------------------------------------------------------------
-static void sally_CPY( ) {
+static inline void sally_CPY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "CPY" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
 
   if(sally_y >= data) {
@@ -515,7 +724,12 @@ static void sally_CPY( ) {
 // ----------------------------------------------------------------------------
 // DEC
 // ----------------------------------------------------------------------------
-static void sally_DEC( ) {
+static inline void sally_DEC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "DEC" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
   memory_Write(sally_address.w, --data);
   sally_Flags(data);
@@ -524,21 +738,36 @@ static void sally_DEC( ) {
 // ----------------------------------------------------------------------------
 // DEX
 // ----------------------------------------------------------------------------
-static void sally_DEX( ) {
+static inline void sally_DEX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "DEX" );
+logger_LogInfo( msg );
+#endif
+
   sally_Flags(--sally_x);
 }
 
 // ----------------------------------------------------------------------------
 // DEY
 // ----------------------------------------------------------------------------
-static void sally_DEY( ) {
+static inline void sally_DEY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "DEY" );
+logger_LogInfo( msg );
+#endif
+
   sally_Flags(--sally_y);
 }
 
 // ----------------------------------------------------------------------------
 // EOR
 // ----------------------------------------------------------------------------
-static void sally_EOR( ) {
+static inline void sally_EOR( ) {
+#ifdef LOWTRACE
+sprintf( msg, "EOR" );
+logger_LogInfo( msg );
+#endif
+
   sally_a ^= memory_Read(sally_address.w);
   sally_Flags(sally_a);
 }
@@ -546,7 +775,12 @@ static void sally_EOR( ) {
 // ----------------------------------------------------------------------------
 // INC
 // ----------------------------------------------------------------------------
-static void sally_INC( ) {
+static inline void sally_INC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "INC" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
   memory_Write(sally_address.w, ++data);
   sally_Flags(data);
@@ -555,39 +789,70 @@ static void sally_INC( ) {
 // ----------------------------------------------------------------------------
 // INX
 // ----------------------------------------------------------------------------
-static void sally_INX( ) {
+static inline void sally_INX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "INX" );
+logger_LogInfo( msg );
+#endif
+
   sally_Flags(++sally_x);
 }
 
 // ----------------------------------------------------------------------------
 // INY
 // ----------------------------------------------------------------------------
-static void sally_INY( ) {
+static inline void sally_INY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "INY" );
+logger_LogInfo( msg );
+#endif
+
   sally_Flags(++sally_y);
 }
 
 // ----------------------------------------------------------------------------
 // JMP
 // ----------------------------------------------------------------------------
-static void sally_JMP( ) {
+static inline void sally_JMP( ) {
+#ifdef LOWTRACE
+sprintf( msg, "JMP" );
+logger_LogInfo( msg );
+#endif
+
   sally_pc = sally_address;
+
+  // Check for known entry point of high score ROM
+  sally_checkHighScoreSet();
 }
 
 // ----------------------------------------------------------------------------
 // JSR
 // ----------------------------------------------------------------------------
-static void sally_JSR( ) {
+static inline void sally_JSR( ) {
+#ifdef LOWTRACE
+sprintf( msg, "JSR" );
+logger_LogInfo( msg );
+#endif
+
   sally_pc.w--;
   sally_Push(sally_pc.b.h);
   sally_Push(sally_pc.b.l);
     
   sally_pc = sally_address;
+
+  // Check for known entry point of high score ROM
+  sally_checkHighScoreSet();
 }
 
 // ----------------------------------------------------------------------------
 // LDA
 // ----------------------------------------------------------------------------
-static void sally_LDA( ) {
+static inline void sally_LDA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "LDA" );
+logger_LogInfo( msg );
+#endif
+
   sally_a = memory_Read(sally_address.w);
   sally_Flags(sally_a);
 }
@@ -595,7 +860,12 @@ static void sally_LDA( ) {
 // ----------------------------------------------------------------------------
 // LDX
 // ----------------------------------------------------------------------------
-static void sally_LDX( ) {
+static inline void sally_LDX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "LDX" );
+logger_LogInfo( msg );
+#endif
+
   sally_x = memory_Read(sally_address.w);
   sally_Flags(sally_x);
 }
@@ -603,7 +873,12 @@ static void sally_LDX( ) {
 // ----------------------------------------------------------------------------
 // LDY
 // ----------------------------------------------------------------------------
-static void sally_LDY( ) {
+static inline void sally_LDY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "LDY" );
+logger_LogInfo( msg );
+#endif
+
   sally_y = memory_Read(sally_address.w);
   sally_Flags(sally_y);
 }
@@ -611,7 +886,12 @@ static void sally_LDY( ) {
 // ----------------------------------------------------------------------------
 // LSRA
 // ----------------------------------------------------------------------------
-static void sally_LSRA( ) {
+static inline void sally_LSRA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "LSRA" );
+logger_LogInfo( msg );
+#endif
+
   sally_p &= ~SALLY_FLAG.C;
   sally_p |= sally_a & 1;
     
@@ -622,7 +902,12 @@ static void sally_LSRA( ) {
 // ----------------------------------------------------------------------------
 // LSR
 // ----------------------------------------------------------------------------
-static void sally_LSR( ) {
+static inline void sally_LSR( ) {
+#ifdef LOWTRACE
+sprintf( msg, "LSR" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
     
   sally_p &= ~SALLY_FLAG.C;
@@ -636,13 +921,23 @@ static void sally_LSR( ) {
 // ----------------------------------------------------------------------------
 // NOP
 // ----------------------------------------------------------------------------
-static void sally_NOP( ) {
+static inline void sally_NOP( ) {
+#ifdef LOWTRACE
+sprintf( msg, "NOP" );
+logger_LogInfo( msg );
+#endif
+
 }
 
 // ----------------------------------------------------------------------------
 // ORA
 // ----------------------------------------------------------------------------
-static void sally_ORA( ) {
+static inline void sally_ORA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ORA" );
+logger_LogInfo( msg );
+#endif
+
   sally_a |= memory_Read(sally_address.w);
   sally_Flags(sally_a);
 }
@@ -650,21 +945,36 @@ static void sally_ORA( ) {
 // ----------------------------------------------------------------------------
 // PHA
 // ----------------------------------------------------------------------------
-static void sally_PHA( ) {
+static inline void sally_PHA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "PHA" );
+logger_LogInfo( msg );
+#endif
+
   sally_Push(sally_a);    
 }
 
 // ----------------------------------------------------------------------------
 // PHP
 // ----------------------------------------------------------------------------
-static void sally_PHP( ) {
+static inline void sally_PHP( ) {
+#ifdef LOWTRACE
+sprintf( msg, "PHP" );
+logger_LogInfo( msg );
+#endif
+
   sally_Push(sally_p);
 }
 
 // ----------------------------------------------------------------------------
 // PLA
 // ----------------------------------------------------------------------------
-static void sally_PLA( ) {
+static inline void sally_PLA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "PLA" );
+logger_LogInfo( msg );
+#endif
+
   sally_a = sally_Pop( );
   sally_Flags(sally_a);
 }
@@ -672,14 +982,24 @@ static void sally_PLA( ) {
 // ----------------------------------------------------------------------------
 // PLP
 // ----------------------------------------------------------------------------
-static void sally_PLP( ) {
+static inline void sally_PLP( ) {
+#ifdef LOWTRACE
+sprintf( msg, "PLP" );
+logger_LogInfo( msg );
+#endif
+
   sally_p = sally_Pop( );
 }
 
 // ----------------------------------------------------------------------------
 // ROLA
 // ----------------------------------------------------------------------------
-static void sally_ROLA( ) {
+static inline void sally_ROLA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ROLA" );
+logger_LogInfo( msg );
+#endif
+
   byte temp = sally_p;
 
   if(sally_a & 128) {
@@ -697,7 +1017,12 @@ static void sally_ROLA( ) {
 // ----------------------------------------------------------------------------
 // ROL
 // ----------------------------------------------------------------------------
-static void sally_ROL( ) {
+static inline void sally_ROL( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ROL" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
   byte temp = sally_p;
     
@@ -717,7 +1042,12 @@ static void sally_ROL( ) {
 // ----------------------------------------------------------------------------
 // RORA
 // ----------------------------------------------------------------------------
-static void sally_RORA( ) {
+static inline void sally_RORA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "RORA" );
+logger_LogInfo( msg );
+#endif
+
   byte temp = sally_p;
 
   sally_p &= ~SALLY_FLAG.C;
@@ -734,7 +1064,12 @@ static void sally_RORA( ) {
 // ----------------------------------------------------------------------------
 // ROR
 // ----------------------------------------------------------------------------
-static void sally_ROR( ) {
+static inline void sally_ROR( ) {
+#ifdef LOWTRACE
+sprintf( msg, "ROR" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
   byte temp = sally_p;
     
@@ -753,7 +1088,12 @@ static void sally_ROR( ) {
 // ----------------------------------------------------------------------------
 // RTI
 // ----------------------------------------------------------------------------
-static void sally_RTI( ) {
+static inline void sally_RTI( ) {
+#ifdef LOWTRACE
+sprintf( msg, "RTI" );
+logger_LogInfo( msg );
+#endif
+
   sally_p = sally_Pop( );
   sally_pc.b.l = sally_Pop( );
   sally_pc.b.h = sally_Pop( );
@@ -762,7 +1102,12 @@ static void sally_RTI( ) {
 // ----------------------------------------------------------------------------
 // RTS
 // ----------------------------------------------------------------------------
-static void sally_RTS( ) {
+static inline void sally_RTS( ) {
+#ifdef LOWTRACE
+sprintf( msg, "RTS" );
+logger_LogInfo( msg );
+#endif
+
   sally_pc.b.l = sally_Pop( );
   sally_pc.b.h = sally_Pop( );
   sally_pc.w++;
@@ -771,7 +1116,12 @@ static void sally_RTS( ) {
 // ----------------------------------------------------------------------------
 // SBC
 // ----------------------------------------------------------------------------
-static void sally_SBC( ) {
+static inline void sally_SBC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "SBC" );
+logger_LogInfo( msg );
+#endif
+
   byte data = memory_Read(sally_address.w);
 
   if(sally_p & SALLY_FLAG.D) {
@@ -833,49 +1183,84 @@ static void sally_SBC( ) {
 // ----------------------------------------------------------------------------
 // SEC
 // ----------------------------------------------------------------------------
-static void sally_SEC( ) {
+static inline void sally_SEC( ) {
+#ifdef LOWTRACE
+sprintf( msg, "SEC" );
+logger_LogInfo( msg );
+#endif
+
   sally_p |= SALLY_FLAG.C;  
 }
 
 // ----------------------------------------------------------------------------
 // SED
 // ----------------------------------------------------------------------------
-static void sally_SED( ) {
+static inline void sally_SED( ) {
+#ifdef LOWTRACE
+sprintf( msg, "SED" );
+logger_LogInfo( msg );
+#endif
+
   sally_p |= SALLY_FLAG.D;
 }
 
 // ----------------------------------------------------------------------------
 // SEI
 // ----------------------------------------------------------------------------
-static void sally_SEI( ) {
+static inline void sally_SEI( ) {
+#ifdef LOWTRACE
+sprintf( msg, "SEI" );
+logger_LogInfo( msg );
+#endif
+
   sally_p |= SALLY_FLAG.I;
 }
 
 // ----------------------------------------------------------------------------
 // STA
 // ----------------------------------------------------------------------------
-static void sally_STA( ) {
+static inline void sally_STA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "STA" );
+logger_LogInfo( msg );
+#endif
+
   memory_Write(sally_address.w, sally_a);
 }
 
 // ----------------------------------------------------------------------------
 // STX
 // ----------------------------------------------------------------------------
-static void sally_stx( ) {
+static inline void sally_stx( ) {
+#ifdef LOWTRACE
+sprintf( msg, "STX" );
+logger_LogInfo( msg );
+#endif
+
   memory_Write(sally_address.w, sally_x);
 }
 
 // ----------------------------------------------------------------------------
 // STY
 // ----------------------------------------------------------------------------
-static void sally_STY( ) {
+static inline void sally_STY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "STY" );
+logger_LogInfo( msg );
+#endif
+
   memory_Write(sally_address.w, sally_y);
 }
 
 // ----------------------------------------------------------------------------
 // TAX
 // ----------------------------------------------------------------------------
-static void sally_TAX( ) {
+static inline void sally_TAX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TAX" );
+logger_LogInfo( msg );
+#endif
+
   sally_x = sally_a;
   sally_Flags(sally_x);
 }
@@ -883,7 +1268,12 @@ static void sally_TAX( ) {
 // ----------------------------------------------------------------------------
 // TAY
 // ----------------------------------------------------------------------------
-static void sally_TAY( ) {
+static inline void sally_TAY( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TAY" );
+logger_LogInfo( msg );
+#endif
+
   sally_y = sally_a;
   sally_Flags(sally_y);
 }
@@ -891,7 +1281,12 @@ static void sally_TAY( ) {
 // ----------------------------------------------------------------------------
 // TSX
 // ----------------------------------------------------------------------------
-static void sally_TSX( ) {
+static inline void sally_TSX( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TSX" );
+logger_LogInfo( msg );
+#endif
+
   sally_x = sally_s;
   sally_Flags(sally_x);
 }
@@ -899,7 +1294,12 @@ static void sally_TSX( ) {
 // ----------------------------------------------------------------------------
 // TXA
 // ----------------------------------------------------------------------------
-static void sally_TXA( ) {
+static inline void sally_TXA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TXA" );
+logger_LogInfo( msg );
+#endif
+
   sally_a = sally_x;
   sally_Flags(sally_a);
 }
@@ -907,14 +1307,24 @@ static void sally_TXA( ) {
 // ----------------------------------------------------------------------------
 // TXS
 // ----------------------------------------------------------------------------
-static void sally_TXS( ) {
+static inline void sally_TXS( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TXS" );
+logger_LogInfo( msg );
+#endif
+
   sally_s = sally_x;
 }
 
 // ----------------------------------------------------------------------------
 // TYA
 // ----------------------------------------------------------------------------
-static void sally_TYA( ) {
+static inline void sally_TYA( ) {
+#ifdef LOWTRACE
+sprintf( msg, "TYA" );
+logger_LogInfo( msg );
+#endif
+
   sally_a = sally_y;
   sally_Flags(sally_a);
 }
@@ -923,6 +1333,11 @@ static void sally_TYA( ) {
 // Reset
 // ----------------------------------------------------------------------------
 void sally_Reset( ) {
+#ifdef LOWTRACE
+sprintf( msg, "Reset" );
+logger_LogInfo( msg );
+#endif
+
   sally_a = 0;
   sally_x = 0;
   sally_y = 0;
@@ -934,763 +1349,957 @@ void sally_Reset( ) {
 // ----------------------------------------------------------------------------
 // ExecuteInstruction
 // ----------------------------------------------------------------------------
-uint sally_ExecuteInstruction( ) {
+uint sally_ExecuteInstruction( ) 
+{
+  __label__ 
+l_0x00, l_0x01, l_0x02, l_0x03, l_0x04, l_0x05, l_0x06, l_0x07, l_0x08,
+l_0x09, l_0x0a, l_0x0b, l_0x0c, l_0x0d, l_0x0e, l_0x0f, l_0x10, l_0x11,
+l_0x12, l_0x13, l_0x14, l_0x15, l_0x16, l_0x17, l_0x18, l_0x19, l_0x1a,
+l_0x1b, l_0x1c, l_0x1d, l_0x1e, l_0x1f, l_0x20, l_0x21, l_0x22, l_0x23,
+l_0x24, l_0x25, l_0x26, l_0x27, l_0x28, l_0x29, l_0x2a, l_0x2b, l_0x2c,
+l_0x2d, l_0x2e, l_0x2f, l_0x30, l_0x31, l_0x32, l_0x33, l_0x34, l_0x35,
+l_0x36, l_0x37, l_0x38, l_0x39, l_0x3a, l_0x3b, l_0x3c, l_0x3d, l_0x3e,
+l_0x3f, l_0x40, l_0x41, l_0x42, l_0x43, l_0x44, l_0x45, l_0x46, l_0x47,
+l_0x48, l_0x49, l_0x4a, l_0x4b, l_0x4c, l_0x4d, l_0x4e, l_0x4f, l_0x50,
+l_0x51, l_0x52, l_0x53, l_0x54, l_0x55, l_0x56, l_0x57, l_0x58, l_0x59,
+l_0x5a, l_0x5b, l_0x5c, l_0x5d, l_0x5e, l_0x5f, l_0x60, l_0x61, l_0x62,
+l_0x63, l_0x64, l_0x65, l_0x66, l_0x67, l_0x68, l_0x69, l_0x6a, l_0x6b,
+l_0x6c, l_0x6d, l_0x6e, l_0x6f, l_0x70, l_0x71, l_0x72, l_0x73, l_0x74,
+l_0x75, l_0x76, l_0x77, l_0x78, l_0x79, l_0x7a, l_0x7b, l_0x7c, l_0x7d,
+l_0x7e, l_0x7f, l_0x80, l_0x81, l_0x82, l_0x83, l_0x84, l_0x85, l_0x86,
+l_0x87, l_0x88, l_0x89, l_0x8a, l_0x8b, l_0x8c, l_0x8d, l_0x8e, l_0x8f,
+l_0x90, l_0x91, l_0x92, l_0x93, l_0x94, l_0x95, l_0x96, l_0x97, l_0x98,
+l_0x99, l_0x9a, l_0x9b, l_0x9c, l_0x9d, l_0x9e, l_0x9f, l_0xa0, l_0xa1,
+l_0xa2, l_0xa3, l_0xa4, l_0xa5, l_0xa6, l_0xa7, l_0xa8, l_0xa9, l_0xaa,
+l_0xab, l_0xac, l_0xad, l_0xae, l_0xaf, l_0xb0, l_0xb1, l_0xb2, l_0xb3,
+l_0xb4, l_0xb5, l_0xb6, l_0xb7, l_0xb8, l_0xb9, l_0xba, l_0xbb, l_0xbc,
+l_0xbd, l_0xbe, l_0xbf, l_0xc0, l_0xc1, l_0xc2, l_0xc3, l_0xc4, l_0xc5,
+l_0xc6, l_0xc7, l_0xc8, l_0xc9, l_0xca, l_0xcb, l_0xcc, l_0xcd, l_0xce,
+l_0xcf, l_0xd0, l_0xd1, l_0xd2, l_0xd3, l_0xd4, l_0xd5, l_0xd6, l_0xd7,
+l_0xd8, l_0xd9, l_0xda, l_0xdb, l_0xdc, l_0xdd, l_0xde, l_0xdf, l_0xe0,
+l_0xe1, l_0xe2, l_0xe3, l_0xe4, l_0xe5, l_0xe6, l_0xe7, l_0xe8, l_0xe9,
+l_0xea, l_0xeb, l_0xec, l_0xed, l_0xee, l_0xef, l_0xf0, l_0xf1, l_0xf2,
+l_0xf3, l_0xf4, l_0xf5, l_0xf6, l_0xf7, l_0xf8, l_0xf9, l_0xfa, l_0xfb,
+l_0xfc, l_0xfd, l_0xfe, l_0xff;
+
+    static const void* const a_jump_table[256] = {
+&&l_0x00, &&l_0x01, &&l_0x02, &&l_0x03, &&l_0x04, &&l_0x05, &&l_0x06, &&l_0x07, &&l_0x08,
+&&l_0x09, &&l_0x0a, &&l_0x0b, &&l_0x0c, &&l_0x0d, &&l_0x0e, &&l_0x0f, &&l_0x10, &&l_0x11,
+&&l_0x12, &&l_0x13, &&l_0x14, &&l_0x15, &&l_0x16, &&l_0x17, &&l_0x18, &&l_0x19, &&l_0x1a,
+&&l_0x1b, &&l_0x1c, &&l_0x1d, &&l_0x1e, &&l_0x1f, &&l_0x20, &&l_0x21, &&l_0x22, &&l_0x23,
+&&l_0x24, &&l_0x25, &&l_0x26, &&l_0x27, &&l_0x28, &&l_0x29, &&l_0x2a, &&l_0x2b, &&l_0x2c,
+&&l_0x2d, &&l_0x2e, &&l_0x2f, &&l_0x30, &&l_0x31, &&l_0x32, &&l_0x33, &&l_0x34, &&l_0x35,
+&&l_0x36, &&l_0x37, &&l_0x38, &&l_0x39, &&l_0x3a, &&l_0x3b, &&l_0x3c, &&l_0x3d, &&l_0x3e,
+&&l_0x3f, &&l_0x40, &&l_0x41, &&l_0x42, &&l_0x43, &&l_0x44, &&l_0x45, &&l_0x46, &&l_0x47,
+&&l_0x48, &&l_0x49, &&l_0x4a, &&l_0x4b, &&l_0x4c, &&l_0x4d, &&l_0x4e, &&l_0x4f, &&l_0x50,
+&&l_0x51, &&l_0x52, &&l_0x53, &&l_0x54, &&l_0x55, &&l_0x56, &&l_0x57, &&l_0x58, &&l_0x59,
+&&l_0x5a, &&l_0x5b, &&l_0x5c, &&l_0x5d, &&l_0x5e, &&l_0x5f, &&l_0x60, &&l_0x61, &&l_0x62,
+&&l_0x63, &&l_0x64, &&l_0x65, &&l_0x66, &&l_0x67, &&l_0x68, &&l_0x69, &&l_0x6a, &&l_0x6b,
+&&l_0x6c, &&l_0x6d, &&l_0x6e, &&l_0x6f, &&l_0x70, &&l_0x71, &&l_0x72, &&l_0x73, &&l_0x74,
+&&l_0x75, &&l_0x76, &&l_0x77, &&l_0x78, &&l_0x79, &&l_0x7a, &&l_0x7b, &&l_0x7c, &&l_0x7d,
+&&l_0x7e, &&l_0x7f, &&l_0x80, &&l_0x81, &&l_0x82, &&l_0x83, &&l_0x84, &&l_0x85, &&l_0x86,
+&&l_0x87, &&l_0x88, &&l_0x89, &&l_0x8a, &&l_0x8b, &&l_0x8c, &&l_0x8d, &&l_0x8e, &&l_0x8f,
+&&l_0x90, &&l_0x91, &&l_0x92, &&l_0x93, &&l_0x94, &&l_0x95, &&l_0x96, &&l_0x97, &&l_0x98,
+&&l_0x99, &&l_0x9a, &&l_0x9b, &&l_0x9c, &&l_0x9d, &&l_0x9e, &&l_0x9f, &&l_0xa0, &&l_0xa1,
+&&l_0xa2, &&l_0xa3, &&l_0xa4, &&l_0xa5, &&l_0xa6, &&l_0xa7, &&l_0xa8, &&l_0xa9, &&l_0xaa,
+&&l_0xab, &&l_0xac, &&l_0xad, &&l_0xae, &&l_0xaf, &&l_0xb0, &&l_0xb1, &&l_0xb2, &&l_0xb3,
+&&l_0xb4, &&l_0xb5, &&l_0xb6, &&l_0xb7, &&l_0xb8, &&l_0xb9, &&l_0xba, &&l_0xbb, &&l_0xbc,
+&&l_0xbd, &&l_0xbe, &&l_0xbf, &&l_0xc0, &&l_0xc1, &&l_0xc2, &&l_0xc3, &&l_0xc4, &&l_0xc5,
+&&l_0xc6, &&l_0xc7, &&l_0xc8, &&l_0xc9, &&l_0xca, &&l_0xcb, &&l_0xcc, &&l_0xcd, &&l_0xce,
+&&l_0xcf, &&l_0xd0, &&l_0xd1, &&l_0xd2, &&l_0xd3, &&l_0xd4, &&l_0xd5, &&l_0xd6, &&l_0xd7,
+&&l_0xd8, &&l_0xd9, &&l_0xda, &&l_0xdb, &&l_0xdc, &&l_0xdd, &&l_0xde, &&l_0xdf, &&l_0xe0,
+&&l_0xe1, &&l_0xe2, &&l_0xe3, &&l_0xe4, &&l_0xe5, &&l_0xe6, &&l_0xe7, &&l_0xe8, &&l_0xe9,
+&&l_0xea, &&l_0xeb, &&l_0xec, &&l_0xed, &&l_0xee, &&l_0xef, &&l_0xf0, &&l_0xf1, &&l_0xf2,
+&&l_0xf3, &&l_0xf4, &&l_0xf5, &&l_0xf6, &&l_0xf7, &&l_0xf8, &&l_0xf9, &&l_0xfa, &&l_0xfb,
+&&l_0xfc, &&l_0xfd, &&l_0xfe, &&l_0xff 
+};
+  
+  // Reset half cycle flag
+  half_cycle = false;
+
   sally_opcode = memory_Read(sally_pc.w++);
   sally_cycles = SALLY_CYCLES[sally_opcode];
-  
-  switch(sally_opcode) {
-    case 0x00:
-      sally_BRK( ); 
-      break;
 
-    case 0x01:
+#ifdef LOWTRACE
+sprintf( msg, "Exec: %x, cycles: %d", sally_opcode, sally_cycles );
+logger_LogInfo( msg );
+#endif
+
+/*
+char message[255];
+sprintf( message, "opcode: %d %d", sally_opcode, sally_cycles );
+logger_LogDebug( message );
+*/
+
+	goto *a_jump_table[sally_opcode];
+  
+//  switch(sally_opcode) 
+//  {
+    l_0x00:
+      sally_BRK( ); 
+      return sally_cycles;
+
+    l_0x01:
       sally_IndirectX( ); 
       sally_ORA( ); 
-      break;
+      return sally_cycles;
     
-    case 0x05:
+    l_0x05:
       sally_ZeroPage( );  
       sally_ORA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x06: 
+    l_0x06: 
       sally_ZeroPage( );
       sally_ASL( );
-      break;
+      return sally_cycles;
 
-    case 0x08: 
+    l_0x08: 
       sally_PHP( );
-      break;
+      return sally_cycles;
 
-    case 0x09: 
+    l_0x09: 
       sally_Immediate( ); 
       sally_ORA( ); 
-      break;        
+      return sally_cycles;        
 
-    case 0x0a: 
+    l_0x0a: 
       sally_ASLA( ); 
-      break;        
+      return sally_cycles;        
 
-    case 0x0d: 
+    l_0x0d: 
       sally_Absolute( );  
       sally_ORA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x0e: 
+    l_0x0e: 
       sally_Absolute( );  
       sally_ASL( ); 
-      break;
+      return sally_cycles;
 
-    case 0x10: 
+    l_0x10: 
       sally_Relative( );
       sally_BPL( );
-      break;        
+      return sally_cycles;        
 
-    case 0x11: 
+    l_0x11: 
       sally_IndirectY( ); 
       sally_ORA( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0x15: 
+    l_0x15: 
       sally_ZeroPageX( ); 
       sally_ORA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x16: 
+    l_0x16: 
       sally_ZeroPageX( ); 
       sally_ASL( ); 
-      break;
+      return sally_cycles;
 
-    case 0x18: 
+    l_0x18: 
       sally_CLC( );
-      break;
+      return sally_cycles;
 
-    case 0x19: 
+    l_0x19: 
       sally_AbsoluteY( ); 
       sally_ORA( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0x1d: 
+    l_0x1d: 
       sally_AbsoluteX( ); 
       sally_ORA( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0x1e: 
+    l_0x1e: 
       sally_AbsoluteX( ); 
       sally_ASL( ); 
-      break;
+      return sally_cycles;
 
-    case 0x20: 
+    l_0x20: 
       sally_Absolute( );  
       sally_JSR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x21: 
+    l_0x21: 
       sally_IndirectX( );
       sally_AND( );
-      break;
+      return sally_cycles;
 
-    case 0x24: 
+    l_0x24: 
       sally_ZeroPage( );
       sally_BIT( );
-      break;
 
-    case 0x25: 
+      // Add a half cycle if RIOT/TIA location is accessed. We only track
+      // INPT4 since it is the only one that is accessed during the lightgun
+      // hit detection loop. This should be extended to take into consideration
+      // all RIOT and TIA accesses.
+      if( sally_address.w == INPT4 )
+      {
+        half_cycle = true;
+      }
+
+      return sally_cycles;
+
+    l_0x25: 
       sally_ZeroPage( );
       sally_AND( ); 
-      break;
+      return sally_cycles;
 
-    case 0x26: 
+    l_0x26: 
       sally_ZeroPage( );
       sally_ROL( );
-      break;
+      return sally_cycles;
 
-    case 0x28:
+    l_0x28:
       sally_PLP( );
-      break;
+      return sally_cycles;
 
-    case 0x29:
+    l_0x29:
       sally_Immediate( );
       sally_AND( );
-      break;
+      return sally_cycles;
 
-    case 0x2a: 
+    l_0x2a: 
       sally_ROLA( );
-      break;
+      return sally_cycles;
 
-    case 0x2c: 
+    l_0x2c: 
       sally_Absolute( );
       sally_BIT( );
-      break;
+      return sally_cycles;
 
-    case 0x2d: 
+    l_0x2d: 
       sally_Absolute( );
       sally_AND( );
-      break;
+      return sally_cycles;
 
-    case 0x2e: 
+    l_0x2e: 
       sally_Absolute( );
       sally_ROL( );
-      break;
+      return sally_cycles;
 
-    case 0x30:
+    l_0x30:
       sally_Relative( );
       sally_BMI( );
-      break;
+      return sally_cycles;
 
-    case 0x31: 
+    l_0x31: 
       sally_IndirectY( );
       sally_AND( );
       sally_Delay(sally_y);
-      break;
+      return sally_cycles;
 
-    case 0x35: 
+    l_0x35: 
       sally_ZeroPageX( ); 
       sally_AND( ); 
-      break;
+      return sally_cycles;
 
-    case 0x36: 
+    l_0x36: 
       sally_ZeroPageX( ); 
       sally_ROL( ); 
-      break;
+      return sally_cycles;
 
-    case 0x38: 
+    l_0x38: 
       sally_SEC( );
-      break;
+      return sally_cycles;
 
-    case 0x39: 
+    l_0x39: 
       sally_AbsoluteY( );
       sally_AND( );
       sally_Delay(sally_y);
-      break;
+      return sally_cycles;
 
-    case 0x3d: 
+    l_0x3d: 
       sally_AbsoluteX( ); 
       sally_AND( );
       sally_Delay(sally_x);
-      break;
+      return sally_cycles;
 
-    case 0x3e: 
+    l_0x3e: 
       sally_AbsoluteX( );
       sally_ROL( );
-      break;
+      return sally_cycles;
 
-    case 0x40: 
+    l_0x40: 
       sally_RTI( );
-      break;
+      return sally_cycles;
 
-    case 0x41: 
+    l_0x41: 
       sally_IndirectX( ); 
       sally_EOR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x45: 
+    l_0x45: 
       sally_ZeroPage( );
       sally_EOR( );
-      break;
+      return sally_cycles;
 
-    case 0x46: 
+    l_0x46: 
       sally_ZeroPage( );
       sally_LSR( );
-      break;
+      return sally_cycles;
 
-    case 0x48: 
+    l_0x48: 
       sally_PHA( );
-      break;
+      return sally_cycles;
 
-    case 0x49: 
+    l_0x49: 
       sally_Immediate( ); 
       sally_EOR( ); 
-      break;  
+      return sally_cycles;  
     
-    case 0x4a: 
+    l_0x4a: 
       sally_LSRA( ); 
-      break; 
+      return sally_cycles; 
     
-    case 0x4c: 
+    l_0x4c: 
       sally_Absolute( );  
       sally_JMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0x4d: 
+    l_0x4d: 
       sally_Absolute( );  
       sally_EOR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x4e: 
+    l_0x4e: 
       sally_Absolute( );
       sally_LSR( );
-      break;
+      return sally_cycles;
 
-    case 0x50: 
+    l_0x50: 
       sally_Relative( );
       sally_BVC( );
-      break;
+      return sally_cycles;
 
-    case 0x51: 
+    l_0x51: 
       sally_IndirectY( ); 
       sally_EOR( ); 
       sally_Delay(sally_y); 
-      break;      
+      return sally_cycles;      
 
-    case 0x55: 
+    l_0x55: 
       sally_ZeroPageX( ); 
       sally_EOR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x56: 
+    l_0x56: 
       sally_ZeroPageX( ); 
       sally_LSR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x58: 
+    l_0x58: 
       sally_CLI( );
-      break;
+      return sally_cycles;
 
-    case 0x59: 
+    l_0x59: 
       sally_AbsoluteY( ); 
       sally_EOR( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0x5d: 
+    l_0x5d: 
       sally_AbsoluteX( ); 
       sally_EOR( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0x5e: 
+    l_0x5e: 
       sally_AbsoluteX( ); 
       sally_LSR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x60: 
+    l_0x60: 
       sally_RTS( );
-      break;
+      return sally_cycles;
 
-    case 0x61: 
+    l_0x61: 
       sally_IndirectX( ); 
       sally_ADC( ); 
-      break;
+      return sally_cycles;
 
-    case 0x65: 
+    l_0x65: 
       sally_ZeroPage( );
       sally_ADC( ); 
-      break;
+      return sally_cycles;
 
-    case 0x66: 
+    l_0x66: 
       sally_ZeroPage( );  
       sally_ROR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x68: 
+    l_0x68: 
       sally_PLA( );
-      break;
+      return sally_cycles;
 
-    case 0x69: 
+    l_0x69: 
       sally_Immediate( ); 
       sally_ADC( ); 
-      break;
+      return sally_cycles;
 
-    case 0x6a: 
+    l_0x6a: 
       sally_RORA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x6c: 
+    l_0x6c: 
       sally_Indirect( );
       sally_JMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0x6d: 
+    l_0x6d: 
       sally_Absolute( );
       sally_ADC( ); 
-      break;
+      return sally_cycles;
     
-    case 0x6e: 
+    l_0x6e: 
       sally_Absolute( );  
       sally_ROR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x70: 
+    l_0x70: 
       sally_Relative( );  
       sally_BVS( );
-      break;
+      return sally_cycles;
 
-    case 0x71: 
+    l_0x71: 
       sally_IndirectY( ); 
       sally_ADC( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0x75: 
+    l_0x75: 
       sally_ZeroPageX( ); 
       sally_ADC( ); 
-      break;
+      return sally_cycles;
 
-    case 0x76: 
+    l_0x76: 
       sally_ZeroPageX( ); 
       sally_ROR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x78: 
+    l_0x78: 
       sally_SEI( );
-      break;
+      return sally_cycles;
 
-    case 0x79: 
+    l_0x79: 
       sally_AbsoluteY( ); 
       sally_ADC( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0x7d: 
+    l_0x7d: 
       sally_AbsoluteX( ); 
       sally_ADC( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0x7e: 
+    l_0x7e: 
       sally_AbsoluteX( ); 
       sally_ROR( ); 
-      break;
+      return sally_cycles;
 
-    case 0x81: 
+    l_0x81: 
       sally_IndirectX( ); 
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x84: 
+    l_0x84: 
       sally_ZeroPage( );  
       sally_STY( ); 
-      break;
+      return sally_cycles;
 
-    case 0x85: 
+    l_0x85: 
       sally_ZeroPage( );  
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x86: 
+    l_0x86: 
       sally_ZeroPage( );  
       sally_stx( ); 
-      break;
+      return sally_cycles;
 
-    case 0x88: 
+    l_0x88: 
       sally_DEY( );
-      break;
+      return sally_cycles;
 
-    case 0x8a: 
+    l_0x8a: 
       sally_TXA( );
-      break;
+      return sally_cycles;
 
-    case 0x8c: 
+    l_0x8c: 
       sally_Absolute( );  
       sally_STY( ); 
-      break;
+      return sally_cycles;
 
-    case 0x8d: 
+    l_0x8d: 
       sally_Absolute( );  
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x8e: 
+    l_0x8e: 
       sally_Absolute( );  
       sally_stx( ); 
-      break;
+      return sally_cycles;
 
-    case 0x90: 
+    l_0x90: 
       sally_Relative( );
       sally_BCC( );
-      break;
+      return sally_cycles;
 
-    case 0x91: 
+    l_0x91: 
       sally_IndirectY( ); 
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x94: 
+    l_0x94: 
       sally_ZeroPageX( ); 
       sally_STY( ); 
-      break;
+      return sally_cycles;
 
-    case 0x95: 
+    l_0x95: 
       sally_ZeroPageX( ); 
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x96: 
+    l_0x96: 
       sally_ZeroPageY( ); 
       sally_stx( ); 
-      break;
+      return sally_cycles;
 
-    case 0x98: 
+    l_0x98: 
       sally_TYA( );
-      break;
+      return sally_cycles;
 
-    case 0x99: 
+    l_0x99: 
       sally_AbsoluteY( ); 
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0x9a: 
+    l_0x9a: 
       sally_TXS( );
-      break;
+      return sally_cycles;
 
-    case 0x9d: 
+    l_0x9d: 
       sally_AbsoluteX( ); 
       sally_STA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa0: 
+    l_0xa0: 
       sally_Immediate( ); 
       sally_LDY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa1: 
+    l_0xa1: 
       sally_IndirectX( ); 
       sally_LDA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa2: 
+    l_0xa2: 
       sally_Immediate( ); 
       sally_LDX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa4: 
+    l_0xa4: 
       sally_ZeroPage( );  
       sally_LDY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa5: 
+    l_0xa5: 
       sally_ZeroPage( );  
       sally_LDA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa6: 
+    l_0xa6: 
       sally_ZeroPage( );  
       sally_LDX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xa8: 
+    l_0xa8: 
       sally_TAY( );
-      break;
+      return sally_cycles;
 
-    case 0xa9: 
+    l_0xa9: 
       sally_Immediate( ); 
       sally_LDA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xaa: 
+    l_0xaa: 
       sally_TAX( );
-      break;
+      return sally_cycles;
 
-    case 0xac: 
+    l_0xac: 
       sally_Absolute( );  
       sally_LDY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xad: 
+    l_0xad: 
       sally_Absolute( );  
       sally_LDA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xae: 
+    l_0xae: 
       sally_Absolute( );  
       sally_LDX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xb0: 
+    l_0xb0: 
       sally_Relative( );  
       sally_BCS( );
-      break;
+      return sally_cycles;
 
-    case 0xb1: 
+    l_0xb1: 
       sally_IndirectY( ); 
       sally_LDA( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xb4: 
+    l_0xb4: 
       sally_ZeroPageX( ); 
       sally_LDY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xb5: 
+    l_0xb5: 
       sally_ZeroPageX( ); 
       sally_LDA( ); 
-      break;
+      return sally_cycles;
 
-    case 0xb6: 
+    l_0xb6: 
       sally_ZeroPageY( ); 
       sally_LDX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xb8: 
+    l_0xb8: 
       sally_CLV( );
-      break;
+      return sally_cycles;
 
-    case 0xb9: 
+    l_0xb9: 
       sally_AbsoluteY( ); 
       sally_LDA( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xba: 
+    l_0xba: 
       sally_TSX( );
-      break;
+      return sally_cycles;
 
-    case 0xbc: 
+    l_0xbc: 
       sally_AbsoluteX( ); 
       sally_LDY( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0xbd: 
+    l_0xbd: 
       sally_AbsoluteX( ); 
       sally_LDA( ); 
       sally_Delay(sally_x);
-      break;
+      return sally_cycles;
 
-    case 0xbe: 
+    l_0xbe: 
       sally_AbsoluteY( ); 
       sally_LDX( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xc0: 
+    l_0xc0: 
       sally_Immediate( ); 
       sally_CPY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xc1: 
+    l_0xc1: 
       sally_IndirectX( ); 
       sally_CMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0xc4: 
+    l_0xc4: 
       sally_ZeroPage( );  
       sally_CPY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xc5: 
+    l_0xc5: 
       sally_ZeroPage( );  
       sally_CMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0xc6: 
+    l_0xc6: 
       sally_ZeroPage( );  
       sally_DEC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xc8: 
+    l_0xc8: 
       sally_INY( );
-      break;
+      return sally_cycles;
 
-    case 0xc9: 
+    l_0xc9: 
       sally_Immediate( ); 
       sally_CMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0xca: 
+    l_0xca: 
       sally_DEX( );
-      break;
+      return sally_cycles;
 
-    case 0xcc: 
+    l_0xcc: 
       sally_Absolute( );  
       sally_CPY( ); 
-      break;
+      return sally_cycles;
 
-    case 0xcd: 
+    l_0xcd: 
       sally_Absolute( );  
       sally_CMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0xce: 
+    l_0xce: 
       sally_Absolute( );  
       sally_DEC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xd0: 
+    l_0xd0: 
       sally_Relative( );  
       sally_BNE( );
-      break;          
+      return sally_cycles;          
 
-    case 0xd1: 
+    l_0xd1: 
       sally_IndirectY( ); 
       sally_CMP( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xd5: 
+    l_0xd5: 
       sally_ZeroPageX( ); 
       sally_CMP( ); 
-      break;
+      return sally_cycles;
 
-    case 0xd6: 
+    l_0xd6: 
       sally_ZeroPageX( ); 
       sally_DEC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xd8: 
+    l_0xd8: 
       sally_CLD( );
-      break;
+      return sally_cycles;
 
-    case 0xd9: 
+    l_0xd9: 
       sally_AbsoluteY( ); 
       sally_CMP( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xdd: 
+    l_0xdd: 
       sally_AbsoluteX( ); 
       sally_CMP( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0xde: 
+    l_0xde: 
       sally_AbsoluteX( ); 
       sally_DEC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe0: 
+    l_0xe0: 
       sally_Immediate( ); 
       sally_CPX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe1: 
+    l_0xe1: 
       sally_IndirectX( ); 
       sally_SBC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe4: 
+    l_0xe4: 
       sally_ZeroPage( );  
       sally_CPX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe5: 
+    l_0xe5: 
       sally_ZeroPage( );  
       sally_SBC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe6: 
+    l_0xe6: 
       sally_ZeroPage( );  
       sally_INC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xe8: 
+    l_0xe8: 
       sally_INX( );
-      break;
+      return sally_cycles;
 
-    case 0xe9: 
+    l_0xe9: 
       sally_Immediate( ); 
       sally_SBC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xea:
+    l_0xea:
       sally_NOP( );
-      break;
+      return sally_cycles;
 
-    case 0xec: 
+    l_0xec: 
       sally_Absolute( );  
       sally_CPX( ); 
-      break;
+      return sally_cycles;
 
-    case 0xed: 
+    l_0xed: 
       sally_Absolute( );  
       sally_SBC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xee: 
+    l_0xee: 
       sally_Absolute( );  
       sally_INC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xf0: 
+    l_0xf0: 
       sally_Relative( );
       sally_BEQ( );
-      break;
+      return sally_cycles;
 
-    case 0xf1: 
+    l_0xf1: 
       sally_IndirectY( ); 
       sally_SBC( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xf5: 
+    l_0xf5: 
       sally_ZeroPageX( ); 
       sally_SBC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xf6: 
+    l_0xf6: 
       sally_ZeroPageX( ); 
       sally_INC( ); 
-      break;
+      return sally_cycles;
 
-    case 0xf8: 
+    l_0xf8: 
       sally_SED( );
-      break;
+      return sally_cycles;
 
-    case 0xf9: 
+    l_0xf9: 
       sally_AbsoluteY( ); 
       sally_SBC( ); 
       sally_Delay(sally_y); 
-      break;
+      return sally_cycles;
 
-    case 0xfd: 
+    l_0xfd: 
       sally_AbsoluteX( ); 
       sally_SBC( ); 
       sally_Delay(sally_x); 
-      break;
+      return sally_cycles;
 
-    case 0xfe: 
+    l_0xfe: 
       sally_AbsoluteX( ); 
       sally_INC( ); 
-      break;
-
-    default:
-      break;
-  }
+      return sally_cycles;
+l_0xff:
+l_0xfc:
+l_0xfb:
+l_0xfa:
+l_0xf7:
+l_0xf4:
+l_0xf3:
+l_0xf2:
+l_0xef:
+l_0xeb:
+l_0xe7:
+l_0xe3:
+l_0xe2:
+l_0xdf:
+l_0xdc:
+l_0xdb:
+l_0xda:
+l_0xd7:
+l_0xd4:
+l_0xd3:
+l_0xd2:
+l_0xcf:
+l_0xcb:
+l_0xc7:
+l_0xc3:
+l_0xc2:
+l_0xbf:
+l_0xbb:
+l_0xb7:
+l_0xb3:
+l_0xb2:
+l_0xaf:
+l_0xab:
+l_0xa7:
+l_0xa3:
+l_0x9f:
+l_0x9e:
+l_0x9c:
+l_0x9b:
+l_0x97:
+l_0x93:
+l_0x92:
+l_0x8f:
+l_0x8b:
+l_0x89:
+l_0x87:
+l_0x83:
+l_0x82:
+l_0x80:
+l_0x7f:
+l_0x7c:
+l_0x7b:
+l_0x7a:
+l_0x77:
+l_0x74:
+l_0x73:
+l_0x72:
+l_0x6f:
+l_0x6b:
+l_0x67:
+l_0x64:
+l_0x63:
+l_0x62:
+l_0x5f:
+l_0x5c:
+l_0x5b:
+l_0x5a:
+l_0x57:
+l_0x54:
+l_0x53:
+l_0x52:
+l_0x4f:
+l_0x4b:
+l_0x47:
+l_0x44:
+l_0x43:
+l_0x42:
+l_0x3f:
+l_0x3c:
+l_0x3b:
+l_0x3a:
+l_0x37:
+l_0x34:
+l_0x33:
+l_0x32:
+l_0x2f:
+l_0x2b:
+l_0x27:
+l_0x23:
+l_0x22:
+l_0x1f:
+l_0x1c:
+l_0x1b:
+l_0x1a:
+l_0x17:
+l_0x14:
+l_0x13:
+l_0x12:
+l_0x0f:
+l_0x0c:
+l_0x0b:
+l_0x07:
+l_0x04:
+l_0x03:
+l_0x02:
+      return sally_cycles;
+  //}
 
   return sally_cycles;
 }

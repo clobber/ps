@@ -23,23 +23,63 @@
 // Sound.cpp
 // ----------------------------------------------------------------------------
 #include "Sound.h"
-#define SOUND_LATENCY_SCALE 4
+#include "ProSystem.h"
+#include <SDL.h>
+#include "wii_direct_sound.h"
 
-byte sound_latency = SOUND_LATENCY_VERY_LOW;
+#define SOUND_SOURCE "Sound.cpp"
 
-static const WAVEFORMATEX SOUND_DEFAULT_FORMAT = {WAVE_FORMAT_PCM, 1, 44100, 44100, 1, 8, 0};
-static LPDIRECTSOUND sound_dsound = NULL;
-static LPDIRECTSOUNDBUFFER sound_primaryBuffer = NULL;
-static LPDIRECTSOUNDBUFFER sound_buffer = NULL;
+int wii_sound_length = 0;
+int wii_convert_length = 0;
+
+#define MAX_BUFFER_SIZE 8192
+
+/* LUDO: */
+typedef unsigned short WORD;
+typedef unsigned int   DWORD;
+typedef struct { 
+    WORD  wFormatTag; 
+    WORD  nChannels; 
+    DWORD nSamplesPerSec; 
+    DWORD nAvgBytesPerSec; 
+    WORD  nBlockAlign; 
+    WORD  wBitsPerSample; 
+    WORD  cbSize; 
+} WAVEFORMATEX; 
+
+# define WAVE_FORMAT_PCM 0
+
+static const WAVEFORMATEX SOUND_DEFAULT_FORMAT = {WAVE_FORMAT_PCM, 1, 48000, 48000, 1, 8, 0};
 static WAVEFORMATEX sound_format = SOUND_DEFAULT_FORMAT;
-static uint sound_counter = 0;
 static bool sound_muted = false;
+
+static void wii_storeSound( byte* sample, int length )
+{
+  SDL_AudioCVT audio_convert;
+  SDL_BuildAudioCVT(
+    &audio_convert,
+    AUDIO_U8,
+    1,
+    48000,
+    AUDIO_S16MSB, 
+    2,
+    48000
+    );
+
+  audio_convert.buf = sample;
+  audio_convert.len = length;
+  SDL_ConvertAudio( &audio_convert );
+  PlaySound( (u32*)sample, ( audio_convert.len_cvt / 4 ) );        
+
+  wii_sound_length = length;
+  wii_convert_length = audio_convert.len_cvt;
+}
 
 // ----------------------------------------------------------------------------
 // GetSampleLength
 // ----------------------------------------------------------------------------
 static uint sound_GetSampleLength(uint length, uint unit, uint unitMax) {
-  uint sampleLength = length / unitMax;
+  uint sampleLength = length / unitMax;  
   uint sampleRemain = length % unitMax;
   if(sampleRemain != 0 && sampleRemain >= unit) {
     sampleLength++;
@@ -55,10 +95,11 @@ static void sound_Resample(const byte* source, byte* target, int length) {
   int sourceIndex = 0;
   int targetIndex = 0;
   
+  int max = ( ( prosystem_frequency * prosystem_scanlines ) << 1 );
   while(targetIndex < length) {
-    if(measurement >= 31440) {
+    if(measurement >= max) {
       target[targetIndex++] = source[sourceIndex];
-      measurement -= 31440;
+      measurement -= max;
     }
     else {
       sourceIndex++;
@@ -67,97 +108,12 @@ static void sound_Resample(const byte* source, byte* target, int length) {
   }
 }
 
-// ----------------------------------------------------------------------------
-// RestoreBuffer
-// ----------------------------------------------------------------------------
-static bool sound_RestoreBuffer( ) {
-  if(sound_buffer != NULL) {
-    HRESULT hr = sound_buffer->Restore( );
-    if(FAILED(hr)) {
-      logger_LogError(IDS_SOUND1,"");
-      logger_LogError("",common_Format(hr));
-      return false;
-    }
-  }
-  return true;
-}
-
-// ----------------------------------------------------------------------------
-// ReleaseBuffer
-// ----------------------------------------------------------------------------
-static bool sound_ReleaseBuffer(LPDIRECTSOUNDBUFFER buffer) {
-  if(buffer != NULL) {
-    HRESULT hr = buffer->Release( );
-    sound_buffer = NULL;
-    if(FAILED(hr)) {
-      logger_LogError(IDS_SOUND2,"");
-      logger_LogError("",common_Format(hr));
-      return false;
-    }
-  }
-  return true;
-}
-
-// ----------------------------------------------------------------------------
-// ReleaseSound
-// ----------------------------------------------------------------------------
-static bool sound_ReleaseSound( ) {
-  if(sound_dsound != NULL) {
-    HRESULT hr = sound_dsound->Release( );
-    sound_dsound = NULL;
-    if(FAILED(hr)) {
-      logger_LogError(IDS_SOUND3,"");
-      logger_LogError("",common_Format(hr));
-      return false;
-    }
-  }
-  return true;
-}
 
 // ----------------------------------------------------------------------------
 // Initialize
 // ----------------------------------------------------------------------------
-bool sound_Initialize(HWND hWnd) {
-  if(hWnd == NULL) {
-    logger_LogError(IDS_INPUT1,"");
-    return false;
-  }
-  
-  HRESULT hr = DirectSoundCreate(NULL, &sound_dsound, NULL);
-  if(FAILED(hr) || sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND4,"");
-    logger_LogError("",common_Format(hr));
-    return false;
-  }
-  
-  hr = sound_dsound->SetCooperativeLevel(hWnd, DSSCL_PRIORITY);
-  if(FAILED(hr)) {
-    logger_LogError(IDS_INPUT6,"");
-    logger_LogError("",common_Format(hr));
-    return false;
-  }
-  
-  DSBUFFERDESC primaryDesc;
-  primaryDesc.dwReserved = 0;
-  primaryDesc.dwSize = sizeof(DSBUFFERDESC);
-  primaryDesc.dwFlags = DSBCAPS_PRIMARYBUFFER;
-  primaryDesc.dwBufferBytes = 0;
-  primaryDesc.lpwfxFormat = NULL;
-  
-  hr = sound_dsound->CreateSoundBuffer(&primaryDesc, &sound_primaryBuffer, NULL);
-  if(FAILED(hr) || sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND5,"");  
-    logger_LogError("",common_Format(hr));
-    return false;
-  }
-
-  if(!sound_SetFormat(SOUND_DEFAULT_FORMAT)) {
-    logger_LogError(IDS_SOUND6,"");
-    return false;
-  }
-
-//Leonis
-sound_SetSampleRate(samplerate);
+bool sound_Initialize() {
+  InitialiseAudio();
   return true;
 }
 
@@ -165,36 +121,6 @@ sound_SetSampleRate(samplerate);
 // SetFormat
 // ----------------------------------------------------------------------------
 bool sound_SetFormat(WAVEFORMATEX format) {
-  if(sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND7,"");
-    return false;
-  }
-  if(sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND8,"");
-    return false;
-  }
-  
-  HRESULT hr = sound_primaryBuffer->SetFormat(&format);
-  if(FAILED(hr)) {
-    logger_LogError(IDS_SOUND9,"");
-    logger_LogError("",common_Format(hr));    
-    return false;
-  }
-  
-  DSBUFFERDESC secondaryDesc;
-  secondaryDesc.dwReserved = 0;
-  secondaryDesc.dwSize = sizeof(DSBUFFERDESC);
-  secondaryDesc.dwFlags = DSBCAPS_GLOBALFOCUS;
-  secondaryDesc.dwBufferBytes = format.nSamplesPerSec;
-  secondaryDesc.lpwfxFormat = &format;
-  
-  hr = sound_dsound->CreateSoundBuffer(&secondaryDesc, &sound_buffer, NULL);
-  if(FAILED(hr) || sound_buffer == NULL) {
-    logger_LogError(IDS_SOUND10,"");
-    logger_LogError("",common_Format(hr));
-    return false;
-  }    
-
   sound_format = format;
   return true;
 }
@@ -202,114 +128,28 @@ bool sound_SetFormat(WAVEFORMATEX format) {
 // ----------------------------------------------------------------------------
 // Store
 // ----------------------------------------------------------------------------
+
 bool sound_Store( ) {
-  if(sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND7,"");
-    return false;
-  }
-  if(sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND8,"");
-    return false;
-  }
-  if(sound_buffer == NULL) {
-    logger_LogError(IDS_SOUND11,"");
-    return false;
-  }
-    
-  byte sample[1920];
-  uint length = sound_GetSampleLength(sound_format.nSamplesPerSec, prosystem_frame, prosystem_frequency);
+
+  if( sound_muted ) sound_SetMuted( false );
+
+  byte sample[MAX_BUFFER_SIZE];
+  memset( sample, 0, MAX_BUFFER_SIZE );  
+  uint length = 48000 / prosystem_frequency; /* sound_GetSampleLength(sound_format.nSamplesPerSec, prosystem_frame, prosystem_frequency); */ /* 48000 / prosystem_frequency */
   sound_Resample(tia_buffer, sample, length);
   
   if(cartridge_pokey) {
-    byte pokeySample[1920];
+    byte pokeySample[MAX_BUFFER_SIZE];
+    memset( pokeySample, 0, MAX_BUFFER_SIZE );
     sound_Resample(pokey_buffer, pokeySample, length);
-    for(int index = 0; index < length; index++) {
+    for(uint index = 0; index < length; index++) {
       sample[index] += pokeySample[index];
       sample[index] = sample[index] / 2;
     }
-  }
-  
-  DWORD lockCount = 0;
-  byte* lockStream = NULL;
-  DWORD wrapCount = 0;
-  byte* wrapStream = NULL;
-  
-  HRESULT hr = sound_buffer->Lock(sound_counter, length, (void**)&lockStream, &lockCount, (void**)&wrapStream, &wrapCount, 0);
-  if(FAILED(hr) || lockStream == NULL) {
-    logger_LogError(IDS_SOUND12,"");
-    logger_LogError("",common_Format(hr));
-    if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-      return false;
-    }
-  }
-
-  uint bufferCounter = 0;
-  for(uint lockIndex = 0; lockIndex < lockCount; lockIndex++) {
-    lockStream[lockIndex] = sample[bufferCounter++];
-  }
-  
-  for(uint wrapIndex = 0; wrapIndex < wrapCount; wrapIndex++) {
-    wrapStream[wrapIndex] = sample[bufferCounter++];
-  }
-  
-  hr = sound_buffer->Unlock(lockStream, lockCount, wrapStream, wrapCount);
-  if(FAILED(hr)) {
-    logger_LogError(IDS_SOUND13,"");
-    logger_LogError("",common_Format(hr));
-    if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-      return false;
-    }
-  }  
- 
-  sound_counter += length;
-  if(sound_counter >= sound_format.nSamplesPerSec) {
-    sound_counter -= sound_format.nSamplesPerSec;
-  }
-    
-  return true;
-}
-
-// ----------------------------------------------------------------------------
-// Clear
-// ----------------------------------------------------------------------------
-bool sound_Clear( ) {
-  if(sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND7,"");
-    return false;
-  }
-  if(sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND8,"");
-    return false;
-  }
-  if(sound_buffer == NULL) {
-    logger_LogError(IDS_SOUND11,"");
-    return false;
-  }
-
-  byte* lockStream = NULL;  
-  DWORD lockCount = 0;
-  HRESULT hr = sound_buffer->Lock(0, sound_format.nSamplesPerSec, (void**)&lockStream, &lockCount, NULL, NULL, DSBLOCK_ENTIREBUFFER);
-  if(FAILED(hr) || lockStream == NULL) {
-    logger_LogError(IDS_SOUND12,"");
-    logger_LogError("",common_Format(hr));
-    if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-      return false;
-    }
-  }
-
-  for(uint lockIndex = 0; lockIndex < lockCount; lockIndex++) {
-    lockStream[lockIndex] = 0;
   }  
 
-  hr = sound_buffer->Unlock(lockStream, lockCount, NULL, NULL);
-  if(FAILED(hr)) {
-    logger_LogError(IDS_SOUND13,"");
-    logger_LogError("",common_Format(hr));
-    if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-      return false;
-    }
-  }    
- 
+  wii_storeSound( sample, length );  
+     
   return true;
 }
 
@@ -317,37 +157,10 @@ bool sound_Clear( ) {
 // Play
 // ----------------------------------------------------------------------------
 bool sound_Play( ) {
-  if(sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND7,"");
-    return false;
-  }
-  if(sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND8,"");
-    return false;
-  }
-  if(sound_buffer == NULL) {
-    logger_LogError(IDS_SOUND11,"");
-    return false;
-  }
-
-  if(!sound_muted) {
-    HRESULT hr = sound_buffer->SetCurrentPosition(0);
-    if(FAILED(hr)) {
-      logger_LogError(IDS_SOUND14,"");
-      logger_LogError("",common_Format(hr));
-      return false;
-    }
-  
-    hr = sound_buffer->Play(0, 0, DSBPLAY_LOOPING);
-    if(FAILED(hr)) {
-      logger_LogError(IDS_SOUND15,"");
-      logger_LogError("",common_Format(hr));
-      if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-        return false;
-      }    
-    }
-    sound_counter = (sound_format.nSamplesPerSec / prosystem_frequency) * (sound_latency * SOUND_LATENCY_SCALE);
-  }
+  byte sample[MAX_BUFFER_SIZE];
+  memset( sample, 0, MAX_BUFFER_SIZE );
+  wii_storeSound( sample, 1024 );
+  //ResetAudio();
   return true;
 }
 
@@ -355,28 +168,10 @@ bool sound_Play( ) {
 // Stop
 // ----------------------------------------------------------------------------
 bool sound_Stop( ) {
-  if(sound_dsound == NULL) {
-    logger_LogError(IDS_SOUND7,"");
-    return false;
-  }
-  if(sound_primaryBuffer == NULL) {
-    logger_LogError(IDS_SOUND8,"");
-    return false;
-  }
-  if(sound_buffer == NULL) {
-    logger_LogError(IDS_SOUND11,"");
-    return false;
-  }
-  
-  HRESULT hr = sound_buffer->Stop( );
-  if(FAILED(hr)) {
-    logger_LogError(IDS_SOUND16,"");
-    logger_LogError("",common_Format(hr));
-    if(hr != DSERR_BUFFERLOST || !sound_RestoreBuffer( )) {
-      return false;
-    }
-  }
-
+  byte sample[MAX_BUFFER_SIZE];
+  memset( sample, 0, MAX_BUFFER_SIZE );
+  wii_storeSound( sample, 1024 );
+  //StopAudio();
   return true;
 }
 
@@ -423,11 +218,3 @@ bool sound_IsMuted( ) {
   return sound_muted;
 }
 
-// ----------------------------------------------------------------------------
-// Release
-// ----------------------------------------------------------------------------
-void sound_Release( ) {
-  sound_ReleaseBuffer(sound_buffer);
-  sound_ReleaseBuffer(sound_primaryBuffer);
-  sound_ReleaseSound( );
-}

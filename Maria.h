@@ -24,7 +24,11 @@
 // ----------------------------------------------------------------------------
 #ifndef MARIA_H
 #define MARIA_H
+# if 0 //LUDO:
 #define MARIA_SURFACE_SIZE 93440
+# else
+#define MARIA_SURFACE_SIZE 77440
+# endif
 
 #include "Equates.h"
 #include "Pair.h"
@@ -41,7 +45,8 @@ extern uint maria_RenderScanline( );
 extern void maria_Clear( );
 extern rect maria_displayArea;
 extern rect maria_visibleArea;
-extern byte maria_surface[MARIA_SURFACE_SIZE];
+//extern word* maria_surface;
+extern byte* maria_surface;
 extern word maria_scanline;
 
 #endif

@@ -26,8 +26,18 @@
 #define LOGGER_FILENAME "ProSystem.log"
 
 byte logger_level = LOGGER_LEVEL_DEBUG;
+//# if 0 //LUDO:
 static FILE* logger_file = NULL;
-char a[255]="";
+//# else
+//# include <stdio.h>
+//# define logger_file stdout
+//# endif
+
+#ifdef LOWTRACE
+bool wii_lowtrace = false;
+#endif
+
+#ifdef DEBUG
 
 // ----------------------------------------------------------------------------
 // GetTime
@@ -43,8 +53,15 @@ static std::string logger_GetTime( ) {
 // Log
 // ----------------------------------------------------------------------------
 static void logger_Log(std::string message, byte level, std::string source) {
+#ifdef LOWTRACE
+  if( !wii_lowtrace )
+  {
+      return;
+  }
+#endif
+
   if(logger_file != NULL) {
-    std::string entry = "[" + logger_GetTime( ) + "]";
+    std::string entry = ""; /* "[" + logger_GetTime( ) + "]";
     switch(level) {
       case LOGGER_LEVEL_ERROR:
         entry += "[ERROR]";
@@ -56,10 +73,12 @@ static void logger_Log(std::string message, byte level, std::string source) {
         entry += "[DEBUG]";
         break;
     }
-     entry += " " + message;
+    entry += " " + message;
     if(source.length( ) > 0) {
-      entry += " " + source;
+      entry += " {" + source + "}";
     }
+    */
+    entry += message;
     entry += "\n";
     fwrite(entry.c_str( ), 1, entry.length( ), logger_file);
     fflush(logger_file);
@@ -82,20 +101,15 @@ bool logger_Initialize(std::string filename) {
   return (logger_file != NULL);
 }
 
-
 // ----------------------------------------------------------------------------
-// LogError //////////
+// LogError
 // ----------------------------------------------------------------------------
-void logger_LogError(int message, std::string source) {
-  if(logger_level == LOGGER_LEVEL_ERROR || logger_level == LOGGER_LEVEL_INFO || logger_level == LOGGER_LEVEL_DEBUG) {
-	LoadString(GetModuleHandle(NULL),message, a, 180);
-	std::string b(a);
-    logger_Log(b, LOGGER_LEVEL_ERROR, source);
-  }
+void logger_LogError(std::string message) {
+  logger_LogError(message, "");
 }
 
 // ----------------------------------------------------------------------------
-// LogError    
+// LogError
 // ----------------------------------------------------------------------------
 void logger_LogError(std::string message, std::string source) {
   if(logger_level == LOGGER_LEVEL_ERROR || logger_level == LOGGER_LEVEL_INFO || logger_level == LOGGER_LEVEL_DEBUG) {
@@ -103,20 +117,15 @@ void logger_LogError(std::string message, std::string source) {
   }
 }
 
-
 // ----------------------------------------------------------------------------
 // LogInfo
 // ----------------------------------------------------------------------------
-void logger_LogInfo(int message, std::string source) {
-  if(logger_level == LOGGER_LEVEL_INFO || logger_level == LOGGER_LEVEL_DEBUG) {
-	LoadString(GetModuleHandle(NULL),message, a, 180);
-		std::string b(a);
-    logger_Log(b, LOGGER_LEVEL_INFO, source);
-  }
+void logger_LogInfo(std::string message) {
+  logger_LogInfo(message, "");
 }
 
 // ----------------------------------------------------------------------------
-// LogInfo /////////
+// LogInfo
 // ----------------------------------------------------------------------------
 void logger_LogInfo(std::string message, std::string source) {
   if(logger_level == LOGGER_LEVEL_INFO || logger_level == LOGGER_LEVEL_DEBUG) {
@@ -125,14 +134,10 @@ void logger_LogInfo(std::string message, std::string source) {
 }
 
 // ----------------------------------------------------------------------------
-// LogDebug ////////////
+// LogDebug
 // ----------------------------------------------------------------------------
-void logger_LogDebug(int message, std::string source) {
-  if(logger_level == LOGGER_LEVEL_DEBUG) {
-	LoadString(GetModuleHandle(NULL),message, a, 180);
-		std::string b(a);
-    logger_Log(b, LOGGER_LEVEL_DEBUG, source);
-  }
+void logger_LogDebug(std::string message) {
+  logger_LogDebug(message, "");
 }
 
 // ----------------------------------------------------------------------------
@@ -152,3 +157,4 @@ void logger_Release( ) {
     fclose(logger_file);
   }
 }
+# endif

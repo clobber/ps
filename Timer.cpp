@@ -24,50 +24,40 @@
 // ----------------------------------------------------------------------------
 #include "Timer.h"
 
-static LONGLONG timer_currentTime;
-static LONGLONG timer_nextTime;
-static LONGLONG timer_counterFrequency;
+#include <SDL.h>
+
+typedef unsigned long long uInt64;
+
+static uInt64 timer_currentTime;
+static uInt64 timer_nextTime;
 static uint timer_frameTime;
-static bool timer_usingCounter = false;
 
 // ----------------------------------------------------------------------------
 // Initialize
 // ----------------------------------------------------------------------------
 void timer_Initialize( ) {
-  timer_usingCounter = (QueryPerformanceFrequency((LARGE_INTEGER*)&timer_counterFrequency))? true: false;
-  timeBeginPeriod(1);
+    timer_Reset();
 }
 
 // ----------------------------------------------------------------------------
 // Reset
 // ----------------------------------------------------------------------------
 void timer_Reset( ) {
-  if(timer_usingCounter) {
-    QueryPerformanceCounter((LARGE_INTEGER*)&timer_nextTime);
-    timer_frameTime = timer_counterFrequency / prosystem_frequency;
-    timer_nextTime += timer_frameTime;
-  }
-  else {
     timer_frameTime = (1000.0 / (double)prosystem_frequency) * 1000;
-    timer_currentTime = timeGetTime( ) * 1000;
+    timer_currentTime = ((uInt64)SDL_GetTicks()) * 1000;
     timer_nextTime = timer_currentTime + timer_frameTime;
-  }
 }
 
 // ----------------------------------------------------------------------------
 // IsTime
 // ----------------------------------------------------------------------------
 bool timer_IsTime( ) {
-  if(timer_usingCounter) {
-    QueryPerformanceCounter((LARGE_INTEGER*)&timer_currentTime);
-  }
-  else {
-    timer_currentTime = timeGetTime( ) * 1000;
-  }
-  
-  if(timer_currentTime >= timer_nextTime) {
-    timer_nextTime += timer_frameTime;
-    return true;
-  }
-  return false;
+    timer_currentTime = ((uInt64)SDL_GetTicks()) * 1000;
+
+    if(timer_currentTime >= timer_nextTime) {
+        timer_nextTime += timer_frameTime;
+        return true;
+    }
+    return false;
 }
+

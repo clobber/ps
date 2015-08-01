@@ -32,8 +32,13 @@ typedef unsigned int uint;
 union Pair { 
   word w;
   struct Join {
+#ifndef WII
     byte l; 
     byte h;
+#else
+    byte h; 
+    byte l;
+#endif
   } b;
 };
 

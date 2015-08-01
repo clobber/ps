@@ -24,37 +24,26 @@
 // ----------------------------------------------------------------------------
 #ifndef SOUND_H
 #define SOUND_H
+
 #define SOUND_LATENCY_NONE 0
 #define SOUND_LATENCY_VERY_LOW 1
 #define SOUND_LATENCY_LOW 2
 #define SOUND_LATENCY_MEDIUM 3
 #define SOUND_LATENCY_HIGH 4
 #define SOUND_LATENCY_VERY_HIGH 5
-#define NULL 0
-
-#include <DSound.h>
-#include "Common.h"
-#include "Logger.h"
-#include "ProSystem.h"
-#include "Configuration.h"
-#include "Tia.h"
-#include "Pokey.h"
 
 typedef unsigned char byte;
 typedef unsigned short word;
 typedef unsigned int uint;
 
-extern bool sound_Initialize(HWND hWnd);
 extern bool sound_Store( );
-extern bool sound_Clear( );
-extern bool sound_SetFormat(WAVEFORMATEX format);
+extern bool sound_CheckTimer();
 extern bool sound_Play( );
-extern bool sound_Stop( );
 extern bool sound_SetSampleRate(uint rate);
-extern uint sound_GetSampleRate( );
+extern bool sound_Initialize();
 extern bool sound_SetMuted(bool muted);
-extern bool sound_IsMuted( );
-extern void sound_Release( );
-extern byte sound_latency;
+
+extern int wii_sound_length;
+extern int wii_convert_length;
 
 #endif

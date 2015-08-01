@@ -23,9 +23,10 @@
 // Common.cpp
 // ----------------------------------------------------------------------------
 #include "Common.h"
+#include <string.h>
+#include <stdio.h>
 
 std::string common_defaultPath;
-std::string common_screenshotsPath;
 
 // ----------------------------------------------------------------------------
 // Format
@@ -77,6 +78,7 @@ std::string common_Format(bool value) {
   return (value)? "true": "false";
 }
 
+# if 0 //LUDO:
 // ----------------------------------------------------------------------------
 // Format
 // ----------------------------------------------------------------------------
@@ -85,12 +87,20 @@ std::string common_Format(HRESULT result) {
   sprintf(buffer, "%#8x", result);
   return std::string(buffer);
 }
+# endif
 
 // ----------------------------------------------------------------------------
 // ParseUint
 // ----------------------------------------------------------------------------
 uint common_ParseUint(std::string text) {
   return (uint)atoi(text.c_str( ));
+}
+
+// ----------------------------------------------------------------------------
+// ParseInt
+// ----------------------------------------------------------------------------
+int common_ParseInt(std::string text) {
+  return (int)atoi(text.c_str( ));
 }
 
 // ----------------------------------------------------------------------------
@@ -160,18 +170,7 @@ std::string common_Remove(std::string target, char value) {
   return source;
 }
 
-// ----------------------------------------------------------------------------
-// Length
-// ----------------------------------------------------------------------------
-int common_Length(std::string target) {
-  int length = 0;
-  int index;
-  for(index = 0; index < target.size( ); index++) {
-     length++;
-      }
-  return length;
-}
-
+// 1.3
 // ----------------------------------------------------------------------------
 // Replace (string, from, to)
 // ----------------------------------------------------------------------------
@@ -199,20 +198,7 @@ std::string common_Replace(std::string target, char value1, char value2) {
   return source;
 }
 
-
-// ----------------------------------------------------------------------------
-// Replace (string, from, to)
-// ----------------------------------------------------------------------------
-
-std::string common_ReplaceString(std::string target, std::string value1, std::string value2)
- {
-  while(target.find(value1,0) != -1){
-   target.replace(target.find(value1,0), value1.length(), value2);
-  }
-  return target;
-}
-
-
+# if 0 //LUDO:
 // ----------------------------------------------------------------------------
 // GetErrorMessage
 // ----------------------------------------------------------------------------
@@ -230,6 +216,7 @@ std::string common_GetErrorMessage(DWORD error) {
   LocalFree(buffer);
   return message;
 }
+# endif
 
 // ----------------------------------------------------------------------------
 // GetExtension

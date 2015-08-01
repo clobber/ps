@@ -50,3 +50,4 @@ struct Rect {
 
 typedef Rect rect;
 #endif
+

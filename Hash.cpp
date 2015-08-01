@@ -24,6 +24,26 @@
 // ----------------------------------------------------------------------------
 #include "Hash.h"
 
+#include "wii_atari.h"
+#include <string.h>
+#include <stdio.h>
+
+static void
+putu32 (unsigned int data, unsigned char *addr)
+{
+	addr[0] = (unsigned char)data;
+	addr[1] = (unsigned char)(data >> 8);
+	addr[2] = (unsigned char)(data >> 16);
+	addr[3] = (unsigned char)(data >> 24);
+}
+
+static unsigned int
+getu32 ( const unsigned char *addr )     
+{
+	return (((((unsigned long)addr[3] << 8) | addr[2]) << 8)
+		| addr[1]) << 8 | addr[0];
+}
+
 // ----------------------------------------------------------------------------
 // Step1
 // ----------------------------------------------------------------------------
@@ -67,8 +87,14 @@ static uint hash_Step4(uint w, uint x, uint y, uint z, uint data, uint s) {
 // ----------------------------------------------------------------------------
 // Transform
 // ----------------------------------------------------------------------------
-static void hash_Transform(uint out[4], uint in[16]) {
+static void hash_Transform(uint out[4], uint inraw[16]) {
   uint a, b, c, d;
+
+  unsigned int in[16];
+  int i;
+  for (i = 0; i < 16; ++i)
+		in[i] = getu32 ( (const unsigned char*)&(inraw[i]));
+
 
   a = out[0];
   b = out[1];
@@ -155,7 +181,8 @@ static void hash_Transform(uint out[4], uint in[16]) {
 std::string hash_Compute(const byte* source, uint length) {
   uint buffer1[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
   uint buffer2[2] = {0};
-  byte buffer3[64] = {0};
+  //LUDO: word alignment !
+  byte __attribute__((aligned(64))) buffer3[64] = { 0 };
 
   uint temp = buffer2[0];
   if((buffer2[0] = temp + ((uint)length << 3)) < temp) {
@@ -202,35 +229,46 @@ std::string hash_Compute(const byte* source, uint length) {
   count = 63 - count;
 
   if(count < 8) {
-    uint index;
-    for(index = 0; index < count; index++) {
+    for(uint index = 0; index < count; index++) {
       ptr[index] = 0;
     }
 	  hash_Transform(buffer1, (uint*)buffer3);
     
-    for(index = 0; index < 56; index++) {
+    for(uint index = 0; index < 56; index++) {
       buffer3[index] = 0;
     }
   } 
   else {
-    for(index = 0; index < count - 8; index++) {
+    for(uint index = 0; index < count - 8; index++) {
       ptr[index] = 0;
     }
   }
 
-  ((uint*)buffer3)[14] = buffer2[0];
-  ((uint*)buffer3)[15] = buffer2[1];
+  //((uint*)buffer3)[14] = buffer2[0];
+  //((uint*)buffer3)[15] = buffer2[1];
+  putu32( buffer2[0], (unsigned char*)&(((uint*)buffer3)[14]) );
+  putu32( buffer2[1], (unsigned char*)&(((uint*)buffer3)[15]) );
 
-  hash_Transform(buffer1, (uint*)buffer3);
-  
+  hash_Transform(buffer1, (uint*)buffer3);  
+
   byte digest[16];
+  /*
   byte* bufferptr = (byte*)buffer1;
-  for(index = 0; index < 16; index++) {
+  for(uint index = 0; index < 16; index++) {
     digest[index] = bufferptr[index];
   }
+  */
+
+  putu32( buffer1[0], (unsigned char*)&(digest[0]) );
+  putu32( buffer1[1], (unsigned char*)&(digest[4]) );
+  putu32( buffer1[2], (unsigned char*)&(digest[8]) );
+  putu32( buffer1[3], (unsigned char*)&(digest[12]) );
+
 
   char buffer[33] = {0};
   sprintf(buffer, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7], digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14], digest[15]);
+
   return std::string(buffer);
 }
+
 

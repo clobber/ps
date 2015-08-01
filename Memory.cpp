@@ -22,10 +22,14 @@
 // ----------------------------------------------------------------------------
 // Memory.cpp
 // ----------------------------------------------------------------------------
+
+#include "wii_main.h"
 #include "Memory.h"
 
 byte memory_ram[MEMORY_SIZE] = {0};
 byte memory_rom[MEMORY_SIZE] = {0};
+
+int hs_sram_write_count = 0; // Debug, number of writes to High Score SRAM
 
 // ----------------------------------------------------------------------------
 // Reset
@@ -39,12 +43,20 @@ void memory_Reset( ) {
   for(index = 0; index < 16384; index++) {
     memory_rom[index] = 0;
   }
+
+  // Debug, reset write count to High Score SRAM
+  hs_sram_write_count = 0;
 }
 // ----------------------------------------------------------------------------
 // Read
 // ----------------------------------------------------------------------------
 byte memory_Read(word address) {
   byte tmp_byte;
+
+  if( cartridge_pokey && address == POKEY_RANDOM )
+  {
+      return pokey_GetRegister( POKEY_RANDOM );
+  }
 
   switch ( address ) {
   case INTIM:
@@ -70,6 +82,15 @@ byte memory_Read(word address) {
 void memory_Write(word address, byte data) {
 
   if(!memory_rom[address]) {
+
+#if 1
+// Debug, track writes to high score SRAM
+if( address >= 0x1000 && address <= 0x17FF )
+{
+  hs_sram_write_count++;
+}
+#endif
+
     switch(address) {
       case WSYNC:
         if(!(cartridge_flags & 128)) {
@@ -114,13 +135,16 @@ void memory_Write(word address, byte data) {
       case AUDV1:
         tia_SetRegister(AUDV1, data);
         break;
-	  case SWCHA:	/*gdement:  Writing here actually writes to DRA inside the RIOT chip.
-					This value only indirectly affects output of SWCHA.  Ditto for SWCHB.*/
-		riot_SetDRA(data);
-		break;
-	  case SWCHB:
+      
+      case SWCHB:	
+          	/*gdement:  Writing here actually writes to DRB inside the RIOT chip.
+					This value only indirectly affects output of SWCHB.*/
 		riot_SetDRB(data);
 		break;
+
+      case SWCHA:	
+		riot_SetDRA(data);
+        break;     
       case TIM1T:
       case TIM1T | 0x8:
         riot_SetTimer(TIM1T, data);
@@ -152,7 +176,6 @@ void memory_Write(word address, byte data) {
           memory_ram[address + 8192] = data;
         }
         break;
-	/*TODO: gdement:  test here for debug port.  Don't put it in the switch because that will change behavior.*/
     }
   }
   else {
@@ -182,4 +205,10 @@ void memory_ClearROM(word address, word size) {
       memory_rom[address + index] = 0;
     }
   }
+}
+
+extern "C" byte* 
+get_memory_ram()
+{
+  return memory_ram;
 }

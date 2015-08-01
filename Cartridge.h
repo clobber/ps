@@ -36,10 +36,9 @@
 #define CARTRIDGE_CONTROLLER_LIGHTGUN 2
 #define CARTRIDGE_WSYNC_MASK 2
 #define CARTRIDGE_CYCLE_STEALING_MASK 1
-#define NULL 0
 
-#include <Stdio.h>
-#include <String>
+#include <stdio.h>
+#include <string>
 #include "Equates.h"
 #include "Memory.h"
 #include "Hash.h"
@@ -52,6 +51,7 @@ typedef unsigned short word;
 typedef unsigned int uint;
 
 extern bool cartridge_Load(std::string filename);
+extern bool cartridge_Load_buffer(char* rom_buffer, int rom_size);
 extern void cartridge_Store( );
 extern void cartridge_StoreBank(byte bank);
 extern void cartridge_Write(word address, byte data);
@@ -69,5 +69,32 @@ extern bool cartridge_pokey;
 extern byte cartridge_controller[2];
 extern byte cartridge_bank;
 extern uint cartridge_flags;
+
+// The x offset for the lightgun crosshair (allows per cartridge adjustments)
+extern int cartridge_crosshair_x;
+// The y offset for the lightgun crosshair (allows per cartridge adjustments)
+extern int cartridge_crosshair_y;
+// The hblank prior to DMA
+extern uint cartridge_hblank;
+// Whether the cartridge supports dual analog
+extern bool cartridge_dualanalog;
+
+/*
+ * Loads the high score cartridge
+ *
+ * return   Whether the load was successful
+ */
+extern bool cartridge_LoadHighScoreCart();
+
+/*
+ * Saves the high score cartridge SRAM 
+ *
+ * return   Whether the save was successful
+ */
+extern bool cartridge_SaveHighScoreSram();
+
+// Whether the cartridge has accessed the high score ROM (indicates that the
+// SRAM should be persisted when the cartridge is unloaded)
+extern bool high_score_set;
 
 #endif

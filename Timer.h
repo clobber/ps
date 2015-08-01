@@ -25,7 +25,6 @@
 #ifndef TIMER_H
 #define TIMER_H
 
-#include <Windows.h>
 #include "ProSystem.h"
 #include "Logger.h"
 #include "Common.h"

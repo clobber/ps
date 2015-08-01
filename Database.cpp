@@ -23,45 +23,56 @@
 // Database.cpp
 // ----------------------------------------------------------------------------
 #include "Database.h"
+#include "Common.h"
+
+#ifdef WII
+#include "wii_main.h"
+#include "wii_app.h"
+#endif
+
+#define DATABASE_SOURCE "Database.cpp"
 
 bool database_enabled = true;
-std::string database_filename;
+std::string database_filename = "./prosystem.dat";
 
 static std::string database_GetValue(std::string entry) {
   int index = entry.rfind('=');
   return entry.substr(index + 1);
 }
 
-// ----------------------------------------------------------------------------
-// Initialize
-// ----------------------------------------------------------------------------
-void database_Initialize( ) {
-  database_filename = common_defaultPath + "ProSystem.dat";
-}
+#ifdef WII
+char database_loc[WII_MAX_PATH];
+#endif
 
 // ----------------------------------------------------------------------------
 // Load
 // ----------------------------------------------------------------------------
 bool database_Load(std::string digest) {
   if(database_enabled) {
-    logger_LogInfo(IDS_DATABASE1, database_filename);
-    
+
+#ifndef WII
     FILE* file = fopen(database_filename.c_str( ), "r");
+#else    
+    FILE* file = fopen( WII_PROSYSTEM_DB, "r" );
+#endif
     if(file == NULL) {
-      logger_LogError(IDS_DATABASE2,"");
       return false;  
     }
 
+    bool found = false;
     char buffer[256];
     while(fgets(buffer, 256, file) != NULL) {
       std::string line = buffer;
-      if(line.compare(1, 32, digest.c_str( )) == 0) {
-        std::string entry[7];
-        for(int index = 0; index < 7; index++) {
+      if( line.compare(1, 32, digest.c_str( )) == 0 ) {        
+        found = true;
+        std::string entry[11];
+        for(int index = 0; index < 11; index++) {
+          buffer[0] = '\0';
           fgets(buffer, 256, file);
-          entry[index] = common_Remove(buffer, '\n');  
+          entry[index] = common_Remove(buffer, '\r');  
+          entry[index] = common_Remove(entry[index], '\n');            
         }
-        
+
         cartridge_title = database_GetValue(entry[0]);
         cartridge_type = common_ParseByte(database_GetValue(entry[1]));
         cartridge_pokey = common_ParseBool(database_GetValue(entry[2]));
@@ -69,9 +80,38 @@ bool database_Load(std::string digest) {
         cartridge_controller[1] = common_ParseByte(database_GetValue(entry[4]));
         cartridge_region = common_ParseByte(database_GetValue(entry[5]));
         cartridge_flags = common_ParseUint(database_GetValue(entry[6]));
+
+        //
+        // Optionally load the lightgun crosshair offsets, hblank, dual analog
+        //
+        for( int index = 7; index < 11; index++ )
+        {
+          if( entry[index].find( "crossx" ) != std::string::npos )
+          {
+              cartridge_crosshair_x = common_ParseInt(database_GetValue(entry[index]));
+          }         
+          if( entry[index].find( "crossy" ) != std::string::npos )
+          {
+              cartridge_crosshair_y = common_ParseInt(database_GetValue(entry[index]));
+          }         
+          if( entry[index].find( "hblank" ) != std::string::npos )
+          {
+              cartridge_hblank = common_ParseInt(database_GetValue(entry[index]));
+          }         
+          if( entry[index].find( "dualanalog" ) != std::string::npos )
+          {
+              cartridge_dualanalog = common_ParseBool(database_GetValue(entry[index]));
+          }         
+        }
+
         break;
       }
     }    
+
+    if( wii_debug && !found )
+    {
+      fprintf( stderr, "unable to locate cartridge in database.\n" );
+    }
     
     fclose(file);  
   }
